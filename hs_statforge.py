@@ -2,6 +2,7 @@
 import ctypes
 import hashlib
 import json
+import math
 import os
 import struct
 import sys
@@ -42,7 +43,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.1.0-s10"
+APP_TITLE = "HS Offline Stat Forge v2.2.0-s10-adaptive"
 
 
 def runtime_app_dir():
@@ -52,13 +53,12 @@ def runtime_app_dir():
 
 
 CONFIG_FILE = os.path.join(runtime_app_dir(), "hs_statforge_stats.json")
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 CONFIG_SEASON = 10
 # These Season 9 routes target code that no longer exists in Season 10.  They
 # are pruned during config migration so an older local JSON cannot re-enable
 # an unsafe fallback address.
 RETIRED_S10_BINDINGS = {"angelic_drop_rate", "angelic_ss_drops"}
-HERO_EXE_S10_SHA256 = "ba72b95ac10785d0ecdcc2b3d1925d6cb3439efaf4cef9de2ea1f67d6cfdd4df"
 AC_DLL_TABLE_RVA = 0x5688
 AC_DLL_TABLE_ENTRY_SIZE = 0x28
 AC_DLL_TABLE_PAGE_SIZE = 0x5008
@@ -85,6 +85,20 @@ S10_BOOL_TEST_SUFFIXES = (
     bytes.fromhex("84 d2"),
     bytes.fromhex("40 84 ff"),
     bytes.fromhex("40 84 f6"),
+)
+# YYC may move functions between builds, but these argument-save sequences are
+# part of the native script ABI used by the three Season 10 stat functions.
+# Validate the target function itself instead of allow-listing one whole EXE.
+S10_STAT_ENTRY_PREFIXES = (
+    bytes.fromhex("4c 89 44 24 18 48 89 54 24 10 48 89 4c 24 08"),
+    bytes.fromhex("48 8b c4 4c 89 40 18 48 89 50 10 48 89 48 08"),
+)
+S10_STAT_ENTRY_PUSHES = bytes.fromhex("55 53 56 57 41 54 41 55 41 56 41 57")
+S10_STAT_RETURN_PATCH_TAIL = bytes.fromhex(
+    "49 89 00 "
+    "41 c7 40 08 00 00 00 00 "
+    "41 c7 40 0c 0d 00 00 00 "
+    "4c 89 c0 c3"
 )
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
@@ -170,7 +184,6 @@ DEFAULT_STATS = [
         resolver={
             "kind": "s10_stat_return_proxy",
             "module": PROCESS_NAME,
-            "module_sha256": HERO_EXE_S10_SHA256,
             "function_name": "gml_Script_StatMagicFind",
         },
     ),
@@ -183,7 +196,6 @@ DEFAULT_STATS = [
         resolver={
             "kind": "s10_stat_return_proxy",
             "module": PROCESS_NAME,
-            "module_sha256": HERO_EXE_S10_SHA256,
             "function_name": "gml_Script_StatMovementSpeed",
         },
     ),
@@ -196,7 +208,6 @@ DEFAULT_STATS = [
         resolver={
             "kind": "s10_stat_return_proxy",
             "module": PROCESS_NAME,
-            "module_sha256": HERO_EXE_S10_SHA256,
             "function_name": "gml_Script_StatAllSkills",
         },
     ),
@@ -210,7 +221,6 @@ DEFAULT_STATS = [
         resolver={
             "kind": "s10_exp_factor_proxy",
             "module": PROCESS_NAME,
-            "module_sha256": HERO_EXE_S10_SHA256,
             "function_name": "gml_Script_EnemyCalculateExperience",
             "context_hex": S10_EXP_FACTOR_CONTEXT.hex(" "),
             "store_hex": S10_EXP_FACTOR_STORE.hex(" "),
@@ -1104,7 +1114,6 @@ class StatForge:
         module = self._hero_module(module_name)
         if not module:
             raise RuntimeError(f"{module_name} is not loaded")
-        self._verify_module_fingerprint(module, resolver.get("module_sha256"), binding.name)
         functions = self._discover_function_addresses(module)
         function_name = str(resolver.get("function_name") or "gml_Script_EnemyCalculateExperience")
         function_address = functions.get(function_name)
@@ -1124,6 +1133,17 @@ class StatForge:
         site = function_address + positions[0]
         if code[positions[0]:positions[0] + len(store)] != store:
             raise RuntimeError("S10 EXP factor store bytes do not match the verified build")
+        live_context = self._read_raw(site, len(context))
+        live_is_owned_proxy = (
+            len(live_context) == len(context)
+            and live_context[:1] == b"\xe8"
+            and live_context[5:7] == b"\x90\x90"
+            and live_context[len(store):] == context[len(store):]
+        )
+        if live_context != context and not live_is_owned_proxy:
+            raise RuntimeError(
+                f"S10 EXP factor context is not clean at {hex(site)}: {live_context.hex(' ')}"
+            )
         return module, site, store
 
     def _build_s10_exp_cave(self, multiplier: float):
@@ -1143,7 +1163,6 @@ class StatForge:
         module = self._hero_module(module_name)
         if not module:
             raise RuntimeError(f"{module_name} is not loaded")
-        self._verify_module_fingerprint(module, resolver.get("module_sha256"), binding.name)
         functions = self._discover_function_addresses(module)
         load_name = str(resolver.get("load_function") or "gml_Script_LoadDrops")
         source_name = str(resolver.get("source_function") or "gml_Script_DropFlask")
@@ -1248,13 +1267,20 @@ class StatForge:
             raise RuntimeError(f"allocated constant is too far from {hex(load_address)}")
         return ANGELIC_MOVSD_PREFIX + struct.pack("<i", rel)
 
-    def _all_rel32_reachable(self, sites: list[int], target: int):
-        return all((-(1 << 31) <= target - (site + ANGELIC_MOVSD_SIZE) <= (1 << 31) - 1) for site in sites)
+    def _all_rel32_reachable(self, sites: list[int], target: int, instruction_size: int = ANGELIC_MOVSD_SIZE):
+        return all((-(1 << 31) <= target - (site + instruction_size) <= (1 << 31) - 1) for site in sites)
 
-    def _alloc_near_sites(self, sites: list[int], size: int):
-        center = min(sites)
+    def _alloc_near_sites(self, sites: list[int], size: int, instruction_size: int = ANGELIC_MOVSD_SIZE):
+        center = min(sites) & ~0xFFFF
         candidates = []
-        for distance in range(0x100000, 0x70000000, 0x1000000):
+        # Try dense allocation-granularity slots first. This tolerates DLL/code
+        # movement between builds without depending on executable padding.
+        for step in range(1, 2049):
+            distance = step * 0x10000
+            candidates.append(center + distance)
+            candidates.append(center - distance)
+        # Then cover the remainder of rel32 range with sparse hints.
+        for distance in range(0x09000000, 0x70000000, 0x01000000):
             candidates.append(center + distance)
             candidates.append(center - distance)
         candidates.append(0)
@@ -1270,7 +1296,7 @@ class StatForge:
             if not allocated:
                 continue
             allocated_int = int(allocated)
-            if self._all_rel32_reachable(sites, allocated_int):
+            if self._all_rel32_reachable(sites, allocated_int, instruction_size):
                 return allocated_int
             kernel32.VirtualFreeEx(self.pm.process_handle, ctypes.c_void_p(allocated_int), 0, MEM_RELEASE)
         raise RuntimeError("could not allocate a nearby Angelic rate constant")
@@ -1462,11 +1488,30 @@ class StatForge:
         value_bits = struct.unpack("<Q", struct.pack("<d", float(value)))[0]
         return (
             b"\x48\xb8" + struct.pack("<Q", value_bits)
-            + bytes.fromhex("49 89 00")
-            + bytes.fromhex("41 c7 40 08 00 00 00 00")
-            + bytes.fromhex("41 c7 40 0c 0d 00 00 00")
-            + bytes.fromhex("4c 89 c0 c3")
+            + S10_STAT_RETURN_PATCH_TAIL
         )
+
+    @staticmethod
+    def _is_supported_s10_stat_entry(raw: bytes):
+        for prefix in S10_STAT_ENTRY_PREFIXES:
+            expected = prefix + S10_STAT_ENTRY_PUSHES
+            if not raw.startswith(expected):
+                continue
+            # The stack displacement may change between builds, while this LEA
+            # shape and the YYC argument-save/push sequence remain stable.
+            tail = raw[len(expected):]
+            if tail.startswith(b"\x48\x8d") and len(tail) >= 3 and tail[2] in (0xA8, 0xAC):
+                return True
+        return False
+
+    @staticmethod
+    def _is_owned_s10_stat_return_patch(raw: bytes):
+        if len(raw) != 10 + len(S10_STAT_RETURN_PATCH_TAIL):
+            return False
+        if raw[:2] != b"\x48\xb8" or raw[10:] != S10_STAT_RETURN_PATCH_TAIL:
+            return False
+        value = struct.unpack("<d", raw[2:10])[0]
+        return math.isfinite(value)
 
     def _resolve_s10_stat_return_site(self, binding: StatBinding):
         resolver = binding.resolver or {}
@@ -1474,7 +1519,6 @@ class StatForge:
         module = self._hero_module(module_name)
         if not module:
             raise RuntimeError(f"{module_name} not loaded")
-        self._verify_module_fingerprint(module, resolver.get("module_sha256"), binding.name)
         function_name = str(resolver.get("function_name") or "").strip()
         if not function_name:
             raise RuntimeError(f"{binding.name}: missing S10 stat function name")
@@ -1486,6 +1530,15 @@ class StatForge:
         original = self._original_module_bytes(module, site, patch_size)
         if not original or len(original) != patch_size:
             raise RuntimeError(f"{binding.name}: could not read original function entry")
+        if not self._is_supported_s10_stat_entry(original):
+            raise RuntimeError(
+                f"{binding.name}: {function_name} has an unsupported entry layout; no write was made"
+            )
+        live = self._read_raw(site, patch_size)
+        if live != original and not self._is_owned_s10_stat_return_patch(live):
+            raise RuntimeError(
+                f"{binding.name}: {function_name} entry differs from the executable; no write was made"
+            )
         return module, site, original
 
     def _resolve_binding_address(self, binding: StatBinding):
@@ -1538,7 +1591,7 @@ class StatForge:
                 current = self._read_raw(site, len(original))
                 if current == original:
                     raise RuntimeError("native value is calculated at runtime")
-                if len(current) == len(self._build_s10_stat_return_patch(0.0)) and current[:2] == b"\x48\xb8":
+                if self._is_owned_s10_stat_return_patch(current):
                     return struct.unpack("<d", current[2:10])[0]
                 raise RuntimeError(f"unexpected S10 stat proxy bytes: {current.hex(' ')}")
             if self._is_s10_rarity_proxy_binding(binding):
@@ -1810,6 +1863,8 @@ class StatForge:
 
     def _enable_s10_stat_return_proxy(self, binding: StatBinding, value_text: str):
         new_value = float(parse_value(value_text, binding.type_name))
+        if not math.isfinite(new_value):
+            raise RuntimeError(f"{binding.name}: value must be finite")
         resolver = binding.resolver or {}
         if "max" in resolver:
             new_value = min(new_value, float(resolver["max"]))
@@ -1817,7 +1872,7 @@ class StatForge:
         patch = self._build_s10_stat_return_patch(new_value)
         current = self._read_raw(site, len(original))
         if current != original:
-            if len(current) != len(patch) or current[:2] != b"\x48\xb8" or current[10:] != patch[10:]:
+            if not self._is_owned_s10_stat_return_patch(current):
                 raise RuntimeError(f"{binding.name}: stat function entry is not clean; no write was made")
         self._write_patch_group([site], [patch])
         if self._read_raw(site, len(patch)) != patch:
@@ -1841,7 +1896,11 @@ class StatForge:
     def _disable_s10_stat_return_proxy(self, binding: StatBinding):
         payload = self.stat_multi_patches.get(binding.key)
         if payload and payload.get("kind") == "s10_stat_return_proxy":
-            self._write_patch_group(payload.get("sites", []), payload.get("originals", []))
+            sites = payload.get("sites", [])
+            originals = payload.get("originals", [])
+            self._write_patch_group(sites, originals)
+            if any(self._read_raw(site, len(original)) != original for site, original in zip(sites, originals)):
+                raise RuntimeError(f"{binding.name}: native entry restore verification failed")
         self.stat_multi_patches.pop(binding.key, None)
         self.active_stat_keys.discard(binding.key)
         current_var = self.stat_current_vars.get(binding.key)
@@ -1853,7 +1912,7 @@ class StatForge:
     def _enable_s10_exp_proxy(self, binding: StatBinding, value_text: str):
         resolver = binding.resolver or {}
         multiplier = float(parse_value(value_text, binding.type_name))
-        if multiplier <= 0:
+        if not math.isfinite(multiplier) or multiplier <= 0:
             raise RuntimeError("EXP multiplier must be greater than zero")
         max_value = float(resolver.get("max", binding.slider_max))
         multiplier = min(multiplier, max_value)
@@ -1862,7 +1921,7 @@ class StatForge:
         cave_raw = self._build_s10_exp_cave(multiplier)
         cave = 0
         if current == original:
-            cave = self._alloc_near_sites([site], len(cave_raw))
+            cave = self._alloc_near_sites([site], len(cave_raw), instruction_size=5)
         elif len(current) == 7 and current[0] == 0xE8 and current[5:] == b"\x90\x90":
             existing_relative = struct.unpack_from("<i", current, 1)[0]
             existing_cave = site + 5 + existing_relative
@@ -1914,7 +1973,11 @@ class StatForge:
     def _disable_s10_exp_proxy(self, binding: StatBinding):
         payload = self.stat_multi_patches.get(binding.key)
         if payload and payload.get("kind") == "s10_exp_factor_proxy":
-            self._write_patch_group(payload.get("sites", []), payload.get("originals", []))
+            sites = payload.get("sites", [])
+            originals = payload.get("originals", [])
+            self._write_patch_group(sites, originals)
+            if any(self._read_raw(site, len(original)) != original for site, original in zip(sites, originals)):
+                raise RuntimeError(f"{binding.name}: native EXP store restore verification failed")
             cave = payload.get("constant_address")
             if cave:
                 kernel32.VirtualFreeEx(self.pm.process_handle, ctypes.c_void_p(int(cave)), 0, MEM_RELEASE)
@@ -1958,6 +2021,8 @@ class StatForge:
             sites = list(reversed(payload.get("sites", [])))
             originals = list(reversed(payload.get("originals", [])))
             self._write_patch_group(sites, originals)
+            if any(self._read_raw(site, len(original)) != original for site, original in zip(sites, originals)):
+                raise RuntimeError(f"{binding.name}: rarity route restore verification failed")
         self.stat_multi_patches.pop(binding.key, None)
         self.active_stat_keys.discard(binding.key)
         current_var = self.stat_current_vars.get(binding.key)

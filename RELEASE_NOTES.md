@@ -1,27 +1,24 @@
-# HS Offline Stat Forge v2.1.0
+# HS Offline Stat Forge v2.2.0 — Adaptive Build Resolver
 
-This is the completed Season 10 rebuild of StatForge.
+## Fixed
 
-## Highlights
+- Removed the single-build `Hero_Siege.exe` SHA-256 allow-list that rejected compatible Steam and non-Steam Season 10 executables.
+- Magic Find, Movement Speed and All Skills now resolve by exact GameMaker function name and validate the native YYC entry structure before patching.
+- EXP Multiplier now resolves by a unique instruction context without requiring a whole-file fingerprint.
+- Existing local v2 configuration files migrate automatically to adaptive v3 resolver definitions.
+- Restore operations verify original bytes before proxy memory is released.
+- Non-finite stat values are rejected.
+- The packaged application requests administrator privileges automatically.
 
-- Added verified native Season 10 runtime routes for Magic Find, Movement Speed, All Skills and EXP Multiplier.
-- Replaced obsolete Season 9 addresses and removed retired unsafe bindings.
-- Added reversible proxy patches with original-byte restoration and **Restore All** support.
-- Added game-build fingerprint validation so unsupported executables are rejected safely.
-- Reduced toggle delays by caching PE section data and resolved function addresses.
-- Rebuilt the interface in the Obsidian Forge design language used by LootForge.
-- Added modern stat cards, live status indicator, active-forge strip, hover states and a redesigned process selector.
-- Fixed packaged configuration persistence: `hs_statforge_stats.json` is now read and saved beside the executable.
+## Verification
 
-## Default values
+- Read-only resolver tests pass against Hero Siege 7.0.0 (`ba72b95a...`).
+- Read-only resolver tests pass against Steam Hero Siege 7.0.2 (`0766aa8b...`).
+- Private proxy allocation, write, verification and release pass in a live Windows process.
+- Corrupted function entries are rejected without process writes.
 
-- Magic Find: `500`
-- Movement Speed: `111`
-- All Skills: `28`
-- EXP Multiplier: `10x`
+## Upgrade
 
-These are editable starting values, not hard limits except where the interface shows a defined maximum.
+Close older StatForge versions, extract the v2.2.0 package into a fresh folder, launch Hero Siege without EAC and run the new executable.
 
-## Important
-
-Offline/single-player only. The executable on disk is never modified.
+Offline/single-player only. `Hero_Siege.exe` on disk is never modified.
