@@ -1,20 +1,20 @@
 {
-    "version": 1,
+    "version": 2,
+    "season": 10,
     "stats": [
         {
             "key": "magic_find",
             "name": "Magic Find",
             "type": "Double",
             "addr": "",
-            "default_write": "5000",
+            "default_write": "500",
             "button_color": "#0f766e",
             "slider_max": 1000.0,
-            "display_suffix": "x",
             "resolver": {
-                "kind": "ac_dll_table",
-                "module": "ac_dll_gm.dll",
-                "table_rva": 22152,
-                "key": 126490
+                "kind": "s10_stat_return_proxy",
+                "module": "Hero_Siege.exe",
+                "module_sha256": "ba72b95ac10785d0ecdcc2b3d1925d6cb3439efaf4cef9de2ea1f67d6cfdd4df",
+                "function_name": "gml_Script_StatMagicFind"
             }
         },
         {
@@ -22,31 +22,14 @@
             "name": "Movement Speed",
             "type": "Double",
             "addr": "",
-            "default_write": "1000",
+            "default_write": "111",
             "button_color": "#7c3aed",
             "slider_max": 1000.0,
-            "display_suffix": "%",
             "resolver": {
-                "kind": "ac_dll_table",
-                "module": "ac_dll_gm.dll",
-                "table_rva": 22152,
-                "key": 126310
-            }
-        },
-        {
-            "key": "mana_replenish_c",
-            "name": "Mana Replenish via Max Mana",
-            "type": "Double",
-            "addr": "",
-            "default_write": "200",
-            "button_color": "#1e40af",
-            "slider_max": 200.0,
-            "display_suffix": "%",
-            "resolver": {
-                "kind": "ac_dll_table",
-                "module": "ac_dll_gm.dll",
-                "table_rva": 22152,
-                "key": 126574
+                "kind": "s10_stat_return_proxy",
+                "module": "Hero_Siege.exe",
+                "module_sha256": "ba72b95ac10785d0ecdcc2b3d1925d6cb3439efaf4cef9de2ea1f67d6cfdd4df",
+                "function_name": "gml_Script_StatMovementSpeed"
             }
         },
         {
@@ -54,14 +37,14 @@
             "name": "All Skills",
             "type": "Double",
             "addr": "",
-            "default_write": "208",
+            "default_write": "28",
             "button_color": "#b45309",
-            "slider_max": 200.0,
+            "slider_max": 1000.0,
             "resolver": {
-                "kind": "ac_dll_table",
-                "module": "ac_dll_gm.dll",
-                "table_rva": 22152,
-                "key": 126670
+                "kind": "s10_stat_return_proxy",
+                "module": "Hero_Siege.exe",
+                "module_sha256": "ba72b95ac10785d0ecdcc2b3d1925d6cb3439efaf4cef9de2ea1f67d6cfdd4df",
+                "function_name": "gml_Script_StatAllSkills"
             }
         },
         {
@@ -69,17 +52,16 @@
             "name": "EXP Multiplier",
             "type": "Double",
             "addr": "",
-            "default_write": "100",
+            "default_write": "10",
             "button_color": "#be123c",
             "slider_max": 100.0,
-            "display_suffix": "x",
             "resolver": {
-                "kind": "hero_exe_patch_double",
+                "kind": "s10_exp_factor_proxy",
                 "module": "Hero_Siege.exe",
-                "rva": 36984654,
-                "function_name": "gml_Script_EnemyDestroyExperience",
-                "function_delta": 1230,
-                "original_hex": "48 bb 00 00 00 00 00 00 f0 3f",
+                "module_sha256": "ba72b95ac10785d0ecdcc2b3d1925d6cb3439efaf4cef9de2ea1f67d6cfdd4df",
+                "function_name": "gml_Script_EnemyCalculateExperience",
+                "context_hex": "f2 44 0f 11 5c 24 40 83 ce 10",
+                "store_hex": "f2 44 0f 11 5c 24 40",
                 "max": 100
             }
         }
