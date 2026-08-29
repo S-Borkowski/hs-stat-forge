@@ -17,7 +17,7 @@
 namespace
 {
 constexpr std::uint32_t kMagic = 0x44465348; // HSFD
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 constexpr std::size_t kMaxCreators = 16;
 
 enum RuntimeStatus : std::uint32_t
@@ -526,6 +526,37 @@ bool ResolveRuntime(
     return true;
 }
 
+bool ResolveRuntimeHint(
+    const std::uint8_t* moduleBase,
+    std::size_t moduleSize,
+    std::uintptr_t depth,
+    std::uintptr_t layer)
+{
+    if (!gState || gState->creatorCount != kCreatorNames.size()) return false;
+    const auto moduleStart = reinterpret_cast<std::uintptr_t>(moduleBase);
+    const auto moduleEnd = moduleStart + moduleSize;
+    if (depth < moduleStart || depth >= moduleEnd || layer < moduleStart || layer >= moduleEnd)
+        return false;
+    if (!IsExecutableAddress(depth) || !IsExecutableAddress(layer)) return false;
+
+    std::array<int, kMaxCreators> hinted{};
+    for (std::size_t index = 0; index < kCreatorNames.size(); ++index) {
+        const int objectIndex = gState->creatorIndices[index];
+        if (objectIndex < 100 || objectIndex >= 100000) return false;
+        if (index && objectIndex != hinted[index - 1] + 1) return false;
+        hinted[index] = objectIndex;
+    }
+
+    const auto realRValue = ResolveRealRValue(moduleBase, moduleSize);
+    const auto freeRValue = ResolveFreeRValue(moduleBase, moduleSize);
+    if (!realRValue || !freeRValue) return false;
+    gRealRValue = reinterpret_cast<RealRValueFn>(realRValue);
+    gFreeRValue = reinterpret_cast<FreeRValueFn>(freeRValue);
+    gCreatorCount = kCreatorNames.size();
+    std::copy_n(hinted.begin(), gCreatorCount, gCreators.begin());
+    return true;
+}
+
 bool IsCreator(int objectIndex)
 {
     const std::size_t count = (std::min)(gCreatorCount, gCreators.size());
@@ -700,10 +731,22 @@ DWORD WINAPI Worker(void*)
         goto unload;
     }
     {
-        const auto regions = PrivateReadableRegions();
-        std::uintptr_t depth = 0;
-        std::uintptr_t layer = 0;
-        if (!ResolveRuntime(moduleBase, moduleSize, regions, depth, layer)) {
+        std::uintptr_t depth = static_cast<std::uintptr_t>(gState->depthAddress);
+        std::uintptr_t layer = static_cast<std::uintptr_t>(gState->layerAddress);
+        const bool hinted = ResolveRuntimeHint(moduleBase, moduleSize, depth, layer);
+        if (!hinted) {
+            SetMessage("Scanning adaptive GameMaker catalog");
+            gCreatorCount = 0;
+            gCreators.fill(0);
+            depth = 0;
+            layer = 0;
+            const auto regions = PrivateReadableRegions();
+            if (!ResolveRuntime(moduleBase, moduleSize, regions, depth, layer)) {
+                Fail(ERROR_NOT_FOUND, "GameMaker create routes or enemy creator catalog were not resolved");
+                goto unload;
+            }
+        }
+        if (!depth || !layer || gCreatorCount < kCreatorNames.size()) {
             Fail(ERROR_NOT_FOUND, "GameMaker create routes or enemy creator catalog were not resolved");
             goto unload;
         }

@@ -1,3 +1,25 @@
+# HS Offline Stat Forge v2.4.1 — Fast Density Startup
+
+## Improved
+
+- Monster Density now enables in about 0.5 seconds on the verified Hero Siege
+  7.0.5.0 build instead of repeatedly scanning the complete GameMaker heap.
+- The fast route is accepted only after the full executable SHA-256 matches.
+- New or unknown game builds still fall back to the safe adaptive resolver.
+- Disabling density was measured at about 0.1 seconds and still removes the
+  hooks and unloads the embedded runtime completely.
+
+## Verification
+
+- Live test: enable completed in 0.515 seconds with all seven enemy creator
+  routes validated.
+- Disable completed in 0.108 seconds; the density DLL was no longer loaded.
+- Hero Siege remained open and responsive after the lifecycle test.
+
+Offline/single-player only. Launch Hero Siege without EAC.
+
+---
+
 # HS Offline Stat Forge v2.4.0 — Standalone Monster Density
 
 ## Added

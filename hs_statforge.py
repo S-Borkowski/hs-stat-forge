@@ -48,7 +48,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.4.0-s10-standalone-density"
+APP_TITLE = "HS Offline Stat Forge v2.4.1-s10-fast-density"
 
 
 def runtime_app_dir():
@@ -143,9 +143,19 @@ S10_RESULT_HOOK_ALLOCATION_SIZE = 0x1000
 DENSITY_RESOLVER = "s10_standalone_density"
 DENSITY_DLL_NAME = "HSStatForgeDensity.dll"
 DENSITY_MAGIC = 0x44465348
-DENSITY_VERSION = 1
+DENSITY_VERSION = 2
 DENSITY_STATUS_READY = 2
 DENSITY_STATUS_ERROR = 3
+# Exact-build hints skip the expensive GameMaker heap catalog scan. Unknown
+# builds still use the adaptive resolver, so a game update does not turn this
+# optimization into an unsafe fixed-address patch.
+DENSITY_FAST_PATHS = {
+    "438bf4848688c5be52ac15f26f02b46da620d90587c28e766a9cea190f3a7de4": {
+        "depth_rva": 0x0B51C210,
+        "layer_rva": 0x0B51C330,
+        "creator_indices": (1409, 1410, 1411, 1412, 1413, 1414, 1415),
+    },
+}
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
 MEM_RELEASE = 0x8000
@@ -736,7 +746,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.4.0  •  STANDALONE DENSITY",
+            text="v2.4.1  •  FAST STANDALONE DENSITY",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -1440,6 +1450,15 @@ class StatForge:
         expected = str(expected_sha256 or "").strip().lower()
         if not expected:
             raise RuntimeError(f"{label}: missing Season 10 module fingerprint")
+        actual = self._module_fingerprint(module, label)
+        if actual != expected:
+            raise RuntimeError(
+                f"{label}: unsupported Season 10 module build ({actual[:12]}). "
+                "Patch blocked instead of writing an unverified layout."
+            )
+        return actual
+
+    def _module_fingerprint(self, module: dict, label: str = "module"):
         path = str(module.get("path") or "")
         if not path or not os.path.exists(path):
             raise RuntimeError(f"{label}: module path is unavailable")
@@ -1453,11 +1472,6 @@ class StatForge:
                     digest.update(chunk)
             actual = digest.hexdigest().lower()
             self.verified_module_hashes[cache_key] = actual
-        if actual != expected:
-            raise RuntimeError(
-                f"{label}: unsupported Season 10 module build ({actual[:12]}). "
-                "Patch blocked instead of writing an unverified layout."
-            )
         return actual
 
     def _decode_exe_patch_value(self, raw_data: bytes):
@@ -2947,6 +2961,7 @@ class StatForge:
                 pass
 
     def _enable_density(self, binding: StatBinding, value_text: str):
+        resolver_mode = "loaded runtime"
         multiplier = float(parse_value(value_text, binding.type_name))
         minimum = float((binding.resolver or {}).get("min", 1))
         maximum = float((binding.resolver or {}).get("max", 5))
@@ -2979,6 +2994,25 @@ class StatForge:
             state.size = ctypes.sizeof(state)
             state.multiplier = 1.0
             state.host_heartbeat = kernel32.GetTickCount64()
+            resolver_mode = "adaptive scan"
+            try:
+                game_module = self._hero_module(PROCESS_NAME)
+                fingerprint = self._module_fingerprint(game_module, "Monster Density")
+                fast_path = DENSITY_FAST_PATHS.get(fingerprint)
+                if fast_path:
+                    module_base = int(game_module["base"])
+                    state.depth_address = module_base + int(fast_path["depth_rva"])
+                    state.layer_address = module_base + int(fast_path["layer_rva"])
+                    creator_indices = tuple(int(value) for value in fast_path["creator_indices"])
+                    state.creator_count = len(creator_indices)
+                    for index, object_index in enumerate(creator_indices):
+                        state.creator_indices[index] = object_index
+                    resolver_mode = "verified fast path"
+            except Exception:
+                # Fingerprinting is only an optimization. If the executable is
+                # unusual or temporarily locked, the DLL's adaptive resolver
+                # remains the safe fallback.
+                pass
             self.density_mapping = mapping
             self.density_state = state
 
@@ -3029,7 +3063,7 @@ class StatForge:
         )
         self.log_line(
             f"{binding.name}: ON | {multiplier:g}x | standalone runtime, "
-            f"{state.creator_count} creator routes verified, no YYToolkit dependency."
+            f"{state.creator_count} creator routes verified ({resolver_mode}), no YYToolkit dependency."
         )
 
     def _disable_density(self, binding: StatBinding):

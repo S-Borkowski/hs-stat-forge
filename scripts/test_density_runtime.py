@@ -15,7 +15,7 @@ import pymem.process
 
 
 MAGIC = 0x44465348
-VERSION = 1
+VERSION = 2
 STATUS_READY = 2
 STATUS_ERROR = 3
 ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
