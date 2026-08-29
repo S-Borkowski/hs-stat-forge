@@ -12,6 +12,8 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox
 
+import hs_valuescanner as scan
+
 try:
     import pymem
     import pymem.memory
@@ -39,11 +41,12 @@ from hs_valuescanner import (
     parse_value,
     read_value,
     read_ptr,
+    resolve_main_module,
     resolve_pointer_path,
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.2.0-s10-adaptive"
+APP_TITLE = "HS Offline Stat Forge v2.3.0-s10-extended-stats"
 
 
 def runtime_app_dir():
@@ -53,7 +56,8 @@ def runtime_app_dir():
 
 
 CONFIG_FILE = os.path.join(runtime_app_dir(), "hs_statforge_stats.json")
-CONFIG_VERSION = 3
+LOG_FILE = os.path.join(runtime_app_dir(), "hs_statforge.log")
+CONFIG_VERSION = 7
 CONFIG_SEASON = 10
 # These Season 9 routes target code that no longer exists in Season 10.  They
 # are pruned during config migration so an older local JSON cannot re-enable
@@ -92,14 +96,36 @@ S10_BOOL_TEST_SUFFIXES = (
 S10_STAT_ENTRY_PREFIXES = (
     bytes.fromhex("4c 89 44 24 18 48 89 54 24 10 48 89 4c 24 08"),
     bytes.fromhex("48 8b c4 4c 89 40 18 48 89 50 10 48 89 48 08"),
+    # gml_Script_EnemyCalculateExperience saves RBX with a MOV instead of a
+    # PUSH, so its prologue carries an extra "48 89 58 20" here and one fewer
+    # push below.  Without this variant the return proxy refused the function,
+    # which is why the EXP knob fell back to patching a constant inside it.
+    bytes.fromhex("48 8b c4 48 89 58 20 4c 89 40 18 48 89 50 10 48 89 48 08"),
 )
-S10_STAT_ENTRY_PUSHES = bytes.fromhex("55 53 56 57 41 54 41 55 41 56 41 57")
+# Which registers are pushed depends on whether RBX was already saved above.
+S10_STAT_ENTRY_PUSH_VARIANTS = (
+    bytes.fromhex("55 53 56 57 41 54 41 55 41 56 41 57"),   # RBX pushed
+    bytes.fromhex("55 56 57 41 54 41 55 41 56 41 57"),      # RBX saved by MOV
+)
+S10_STAT_ENTRY_PUSHES = S10_STAT_ENTRY_PUSH_VARIANTS[0]
 S10_STAT_RETURN_PATCH_TAIL = bytes.fromhex(
+    "49 89 00 "
+    "41 c7 40 08 00 00 00 00 "
+    "41 c7 40 0c 00 00 00 00 "
+    "4c 89 c0 c3"
+)
+S10_STAT_LEGACY_BOOL_RETURN_PATCH_TAIL = bytes.fromhex(
     "49 89 00 "
     "41 c7 40 08 00 00 00 00 "
     "41 c7 40 0c 0d 00 00 00 "
     "4c 89 c0 c3"
 )
+S10_ARRAY_RESULT_MULTIPLIER = "s10_array_result_multiplier"
+S10_ARRAY_RESULT_ADDITIVE = "s10_array_result_additive"
+S10_SCALAR_RESULT_MULTIPLIER = "s10_scalar_result_multiplier"
+S10_RESULT_EPILOGUE_PATCH_SIZE = 7
+S10_RESULT_HOOK_DATA_OFFSET = 0x100
+S10_RESULT_HOOK_ALLOCATION_SIZE = 0x1000
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
 MEM_RELEASE = 0x8000
@@ -129,6 +155,200 @@ kernel32.ResumeThread.argtypes = (ctypes.wintypes.HANDLE,)
 kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
 kernel32.CloseHandle.argtypes = (ctypes.wintypes.HANDLE,)
 kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+
+def build_s10_result_epilogue_patch(cave: int, site: int, patch_size: int = S10_RESULT_EPILOGUE_PATCH_SIZE) -> bytes:
+    if patch_size < 5:
+        raise ValueError("result hook patch must cover at least five bytes")
+    relative = int(cave) - (int(site) + 5)
+    if not -(2**31) <= relative < 2**31:
+        raise ValueError("result hook cave is outside rel32 range")
+    return b"\xe8" + struct.pack("<i", relative) + b"\x90" * (patch_size - 5)
+
+
+def _finish_result_hook_blob(code: bytearray, fixups: list[tuple[int, str]], labels: dict[str, int]) -> bytes:
+    for displacement_at, label in fixups:
+        if label not in labels:
+            raise ValueError(f"missing result hook label: {label}")
+        struct.pack_into("<i", code, displacement_at, labels[label] - (displacement_at + 4))
+    if len(code) >= S10_RESULT_HOOK_DATA_OFFSET:
+        raise ValueError("result hook code overlaps its telemetry data")
+    blob = bytearray(S10_RESULT_HOOK_ALLOCATION_SIZE)
+    blob[:len(code)] = code
+    return blob
+
+
+def _is_verified_s10_result_prelude(original: bytes) -> bool:
+    """Accept only complete, observed YYC result/epilogue instruction pairs."""
+    if len(original) == 7 and original[:3] == b"\x48\x8b\x85":
+        return True
+    if len(original) == 8 and original[:7] == b"\x49\x8b\xc6\x48\x8b\x6c\x24":
+        return True
+    if (
+        len(original) == 11
+        and original[:7] == b"\x48\x8b\xc3\x0f\x28\xb4\x24"
+    ):
+        return True  # MOV RAX,RBX + MOVAPS XMM6,[RSP+disp32]
+    if len(original) != 11 or original[:2] != b"\x49\x8b":
+        return False
+    result_register = original[2]
+    if result_register not in (0xC6, 0xC7):  # MOV RAX,R14 / MOV RAX,R15
+        return False
+    replay = original[3:7]
+    return replay in (
+        b"\x0f\x28\xb4\x24",  # MOVAPS XMM6,[RSP+disp32]
+        b"\x4c\x8d\x9c\x24",  # LEA R11,[RSP+disp32]
+        b"\x48\x8b\x9c\x24",  # MOV RBX,[RSP+disp32]
+    )
+
+
+def _call_adjusted_s10_result_prelude(original: bytes) -> bytes:
+    """Replay an observed epilogue correctly after our CALL pushed 8 bytes."""
+    if not _is_verified_s10_result_prelude(original):
+        raise ValueError("result prelude is not verified")
+    adjusted = bytearray(original)
+    if len(original) == 8:
+        displacement = struct.unpack_from("<b", original, 7)[0] + 8
+        if not -128 <= displacement <= 127:
+            raise ValueError("adjusted epilogue disp8 is out of range")
+        struct.pack_into("<b", adjusted, 7, displacement)
+    elif len(original) == 11:
+        displacement = struct.unpack_from("<i", original, 7)[0] + 8
+        struct.pack_into("<i", adjusted, 7, displacement)
+    return bytes(adjusted)
+
+
+def build_s10_array_result_hook_blob(
+    cave: int,
+    original_result_load: bytes,
+    modifier: float,
+    *,
+    additive: bool = False,
+) -> bytes:
+    """Scale element zero of a native Stat* result array.
+
+    Season 10 returns stat details as a GameMaker array.  The RValue points to
+    a dynamic-array object whose element pointer is at +8; element zero is the
+    final value shown by the game.  The last scaled value is recognized so a
+    reused array cannot be multiplied repeatedly.
+    """
+    if not _is_verified_s10_result_prelude(original_result_load):
+        raise ValueError("array result hook site is not a verified complete YYC result prelude")
+    if not math.isfinite(modifier) or (not additive and modifier <= 0):
+        raise ValueError("array result modifier must be finite and multipliers must be positive")
+
+    data = int(cave) + S10_RESULT_HOOK_DATA_OFFSET
+    code = bytearray(_call_adjusted_s10_result_prelude(original_result_load))
+    fixups: list[tuple[int, str]] = []
+    labels: dict[str, int] = {}
+
+    def branch(opcode: bytes, label: str):
+        code.extend(opcode)
+        displacement_at = len(code)
+        code.extend(b"\x00\x00\x00\x00")
+        fixups.append((displacement_at, label))
+
+    code += b"\x48\x85\xc0"                         # test rax,rax
+    branch(b"\x0f\x84", "done")
+    code += b"\x83\x78\x0c\x02"                 # result kind == VALUE_ARRAY
+    branch(b"\x0f\x85", "done")
+    code += b"\x48\x8b\x10\x48\x85\xd2"     # rdx = dynamic array object
+    branch(b"\x0f\x84", "done")
+    code += b"\x48\x8b\x52\x08\x48\x85\xd2" # rdx = RValue element array
+    branch(b"\x0f\x84", "done")
+    code += b"\x83\x7a\x0c\x00"                 # element zero kind == VALUE_REAL
+    branch(b"\x0f\x85", "done")
+    code += b"\x48\xb9" + struct.pack("<Q", data)  # rcx = telemetry
+    code += b"\x48\xff\x41\x10"                 # calls++
+    code += b"\xf2\x0f\x10\x02"                 # xmm0 = current element zero
+    code += b"\x48\x83\x79\x30\x00"           # enabled?
+    branch(b"\x0f\x84", "disabled")
+
+    code += b"\x48\x3b\x51\x20"                 # same element pointer?
+    branch(b"\x0f\x85", "scale")
+    code += b"\x48\x83\x79\x28\x00"           # initialized?
+    branch(b"\x0f\x84", "scale")
+    code += b"\x66\x0f\x2e\x41\x08"           # current == last scaled?
+    branch(b"\x0f\x8a", "scale")                 # unordered means new native
+    branch(b"\x0f\x84", "done")                  # already scaled; do not compound
+
+    labels["scale"] = len(code)
+    code += b"\xf2\x0f\x11\x01"                 # save native
+    code += (b"\xf2\x0f\x58\x41\x18" if additive else b"\xf2\x0f\x59\x41\x18")
+    code += b"\xf2\x0f\x11\x02"                 # write scaled element zero
+    code += b"\xf2\x0f\x11\x41\x08"           # save scaled mirror
+    code += b"\x48\x89\x51\x20"                 # save element pointer
+    code += b"\x48\xc7\x41\x28\x01\x00\x00\x00"  # initialized = 1
+    branch(b"\xe9", "done")
+
+    labels["disabled"] = len(code)
+    code += b"\x48\x3b\x51\x20"
+    branch(b"\x0f\x85", "disabled_done")
+    code += b"\x48\x83\x79\x28\x00"
+    branch(b"\x0f\x84", "disabled_done")
+    code += b"\x66\x0f\x2e\x41\x08"
+    branch(b"\x0f\x8a", "disabled_done")
+    branch(b"\x0f\x85", "disabled_done")
+    code += b"\xf2\x0f\x10\x09"                 # xmm1 = last native
+    code += b"\xf2\x0f\x11\x0a"                 # restore element zero
+
+    labels["disabled_done"] = len(code)
+    code += b"\x48\xc7\x41\x28\x00\x00\x00\x00"  # initialized = 0
+    code += b"\x48\xff\x41\x38"                 # restore calls++
+    labels["done"] = len(code)
+    code += b"\xc3"
+
+    blob = _finish_result_hook_blob(code, fixups, labels)
+    struct.pack_into(
+        "<ddQdQQQQ",
+        blob,
+        S10_RESULT_HOOK_DATA_OFFSET,
+        0.0,
+        0.0,
+        0,
+        float(modifier),
+        0,
+        0,
+        1,
+        0,
+    )
+    return bytes(blob)
+
+
+def build_s10_scalar_result_hook_blob(cave: int, original_result_load: bytes, factor: float) -> bytes:
+    """Scale a real RValue after the game's complete native calculation."""
+    if not _is_verified_s10_result_prelude(original_result_load):
+        raise ValueError("scalar result hook site is not a verified complete YYC result prelude")
+    if not math.isfinite(factor) or factor <= 0:
+        raise ValueError("scalar result multiplier must be positive and finite")
+
+    data = int(cave) + S10_RESULT_HOOK_DATA_OFFSET
+    code = bytearray(_call_adjusted_s10_result_prelude(original_result_load))
+    fixups: list[tuple[int, str]] = []
+    labels: dict[str, int] = {}
+
+    def branch(opcode: bytes, label: str):
+        code.extend(opcode)
+        displacement_at = len(code)
+        code.extend(b"\x00\x00\x00\x00")
+        fixups.append((displacement_at, label))
+
+    code += b"\x48\x85\xc0"
+    branch(b"\x0f\x84", "done")
+    code += b"\x83\x78\x0c\x00"                 # VALUE_REAL
+    branch(b"\x0f\x85", "done")
+    code += b"\x48\xb9" + struct.pack("<Q", data)
+    code += b"\xf2\x0f\x10\x00"
+    code += b"\xf2\x0f\x11\x01"                 # native
+    code += b"\xf2\x0f\x59\x41\x18"
+    code += b"\xf2\x0f\x11\x00"                 # scaled result
+    code += b"\xf2\x0f\x11\x41\x08"           # scaled mirror
+    code += b"\x48\xff\x41\x10"
+    labels["done"] = len(code)
+    code += b"\xc3"
+    blob = _finish_result_hook_blob(code, fixups, labels)
+    struct.pack_into("<ddQd", blob, S10_RESULT_HOOK_DATA_OFFSET, 0.0, 0.0, 0, float(factor))
+    return bytes(blob)
 
 
 @dataclass
@@ -177,26 +397,29 @@ class StatBinding:
 DEFAULT_STATS = [
     StatBinding(
         key="magic_find",
-        name="Magic Find",
+        name="Magic Find Multiplier",
         type_name="Double",
-        default_write="500",
+        default_write="10",
         button_color="#0f766e",
         resolver={
-            "kind": "s10_stat_return_proxy",
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
             "module": PROCESS_NAME,
             "function_name": "gml_Script_StatMagicFind",
+            "max": 1000,
         },
     ),
     StatBinding(
         key="movement_speed",
-        name="Movement Speed",
+        name="Movement Speed Multiplier",
         type_name="Double",
-        default_write="111",
+        default_write="2",
         button_color="#7c3aed",
+        slider_max=100,
         resolver={
-            "kind": "s10_stat_return_proxy",
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
             "module": PROCESS_NAME,
             "function_name": "gml_Script_StatMovementSpeed",
+            "max": 100,
         },
     ),
     StatBinding(
@@ -219,12 +442,148 @@ DEFAULT_STATS = [
         button_color="#be123c",
         slider_max=100,
         resolver={
-            "kind": "s10_exp_factor_proxy",
+            "kind": S10_SCALAR_RESULT_MULTIPLIER,
             "module": PROCESS_NAME,
             "function_name": "gml_Script_EnemyCalculateExperience",
-            "context_hex": S10_EXP_FACTOR_CONTEXT.hex(" "),
-            "store_hex": S10_EXP_FACTOR_STORE.hex(" "),
             "max": 100,
+        },
+    ),
+    StatBinding(
+        key="total_damage_bonus",
+        name="Total Damage Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#dc2626",
+        slider_max=1000,
+        resolver={
+            "kind": S10_SCALAR_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_CalculateEndDamage",
+            "input_mode": "bonus_percent",
+            "max": 1000,
+        },
+    ),
+    StatBinding(
+        key="attack_speed_bonus",
+        name="Attack Speed Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#ea580c",
+        slider_max=500,
+        resolver={
+            "kind": S10_SCALAR_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            # Live 7.0.5.0 telemetry proved this aggregate function returns a
+            # scalar VALUE_REAL (23.1 on the measured character), not a stat
+            # detail array.  The hand-specific array helpers are UI queries.
+            "function_name": "gml_Script_StatAttackSpeed",
+            "input_mode": "bonus_percent",
+            "max": 500,
+        },
+    ),
+    StatBinding(
+        key="faster_cast_rate_bonus",
+        name="Faster Cast Rate Bonus",
+        type_name="Double",
+        default_write="50",
+        button_color="#d97706",
+        slider_max=500,
+        resolver={
+            "kind": S10_ARRAY_RESULT_ADDITIVE,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatFasterCastRate",
+            "input_mode": "additive",
+            "max": 500,
+        },
+    ),
+    StatBinding(
+        key="skill_haste_bonus",
+        name="Skill Haste Bonus",
+        type_name="Double",
+        default_write="100",
+        button_color="#0891b2",
+        slider_max=500,
+        resolver={
+            "kind": S10_ARRAY_RESULT_ADDITIVE,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatSpellHaste",
+            "input_mode": "additive",
+            "max": 500,
+        },
+    ),
+    StatBinding(
+        key="defense_bonus",
+        name="Defense Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#2563eb",
+        slider_max=1000,
+        resolver={
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatDefense",
+            "input_mode": "bonus_percent",
+            "max": 1000,
+        },
+    ),
+    StatBinding(
+        key="critical_strike_damage_bonus",
+        name="Critical Strike Damage Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#be123c",
+        slider_max=1000,
+        resolver={
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatCritDamage",
+            "input_mode": "bonus_percent",
+            "max": 1000,
+        },
+    ),
+    StatBinding(
+        key="critical_strike_chance_bonus",
+        name="Critical Strike Chance Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#db2777",
+        slider_max=500,
+        resolver={
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatCritRate",
+            "input_mode": "bonus_percent",
+            "max": 500,
+        },
+    ),
+    StatBinding(
+        key="spell_critical_damage_bonus",
+        name="Spell Critical Damage Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#9333ea",
+        slider_max=1000,
+        resolver={
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatSpellCritDamage",
+            "input_mode": "bonus_percent",
+            "max": 1000,
+        },
+    ),
+    StatBinding(
+        key="spell_critical_chance_bonus",
+        name="Spell Critical Chance Bonus (%)",
+        type_name="Double",
+        default_write="100",
+        button_color="#7c3aed",
+        slider_max=500,
+        resolver={
+            "kind": S10_ARRAY_RESULT_MULTIPLIER,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatSpellCritRate",
+            "input_mode": "bonus_percent",
+            "max": 500,
         },
     ),
 ]
@@ -251,7 +610,9 @@ class StatForge:
         self.verified_module_hashes: dict[str, str] = {}
         self.pe_sections_cache: dict[tuple, dict] = {}
         self.function_addresses_cache: dict[tuple, dict[str, int]] = {}
+        self._main_module_cache: dict | None = None
         self.runtime_cache_lock = threading.RLock()
+        self._last_process_liveness_check = 0.0
 
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
@@ -267,6 +628,7 @@ class StatForge:
         self._build_ui()
         self._load_bindings()
         threading.Thread(target=self._freeze_loop, daemon=True).start()
+        self.root.after(250, self._poll_result_telemetry)
 
     def _build_ui(self):
         header = tk.Frame(self.root, bg="#0a0910", height=94)
@@ -306,7 +668,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.1  •  MEMORY ONLY",
+            text="v2.2.3  •  REAL RESULT HOOKS",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -590,6 +952,11 @@ class StatForge:
     def log_line(self, text: str):
         self.log.insert("end", f"> {text}\n")
         self.log.see("end")
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {text}\n")
+        except Exception:
+            pass
 
     def _default_payload(self):
         return {
@@ -630,9 +997,16 @@ class StatForge:
             if not default:
                 continue
             if default.resolver and binding.resolver != default.resolver:
+                old_kind = str((binding.resolver or {}).get("kind") or "").lower()
+                new_kind = str(default.resolver.get("kind") or "").lower()
                 binding.resolver = dict(default.resolver)
                 binding.addr = ""
                 binding.pointer = None
+                if old_kind != new_kind:
+                    binding.default_write = default.default_write
+                changed = True
+            if binding.name != default.name:
+                binding.name = default.name
                 changed = True
             if not binding.default_write and default.default_write:
                 binding.default_write = default.default_write
@@ -897,6 +1271,36 @@ class StatForge:
         finally:
             self._resume_game_threads(handles)
 
+    def _write_code_when_quiescent(self, site: int, raw: bytes, attempts: int = 250):
+        """Patch code only while no game thread is executing the target bytes."""
+        rights = scan.THREAD_GET_CONTEXT | scan.THREAD_SUSPEND_RESUME | scan.THREAD_QUERY_INFORMATION
+        region_start = int(site)
+        region_end = region_start + max(S10_RESULT_EPILOGUE_PATCH_SIZE, len(raw))
+        for _attempt in range(attempts):
+            handles = []
+            busy = False
+            try:
+                for thread_id in list_threads(self.pm.process_id):
+                    handle = kernel32.OpenThread(rights, False, int(thread_id))
+                    if not handle:
+                        continue
+                    if kernel32.SuspendThread(handle) == 0xFFFFFFFF:
+                        kernel32.CloseHandle(handle)
+                        continue
+                    handles.append(handle)
+                    context = scan.CONTEXT()
+                    context.ContextFlags = scan.CONTEXT_CONTROL
+                    if kernel32.GetThreadContext(handle, ctypes.byref(context)):
+                        if region_start <= int(context.Rip) < region_end:
+                            busy = True
+                if not busy:
+                    self._write_memory(region_start, bytes(raw))
+                    return
+            finally:
+                self._resume_game_threads(handles)
+            time.sleep(0.002)
+        raise RuntimeError("native stat function remained busy; pause in town and try again")
+
     def _is_exe_patch_binding(self, binding: StatBinding):
         return bool(binding.resolver and str(binding.resolver.get("kind") or "").lower() == "hero_exe_patch_double")
 
@@ -914,6 +1318,31 @@ class StatForge:
 
     def _is_s10_rarity_proxy_binding(self, binding: StatBinding):
         return bool(binding.resolver and str(binding.resolver.get("kind") or "").lower() == "s10_rarity_proxy")
+
+    def _is_s10_array_result_binding(self, binding: StatBinding):
+        return bool(
+            binding.resolver
+            and str(binding.resolver.get("kind") or "").lower() == S10_ARRAY_RESULT_MULTIPLIER
+        )
+
+    def _is_s10_array_additive_binding(self, binding: StatBinding):
+        return bool(
+            binding.resolver
+            and str(binding.resolver.get("kind") or "").lower() == S10_ARRAY_RESULT_ADDITIVE
+        )
+
+    def _is_s10_result_binding(self, binding: StatBinding):
+        return bool(
+            self._is_s10_array_result_binding(binding)
+            or self._is_s10_array_additive_binding(binding)
+            or self._is_s10_scalar_result_binding(binding)
+        )
+
+    def _is_s10_scalar_result_binding(self, binding: StatBinding):
+        return bool(
+            binding.resolver
+            and str(binding.resolver.get("kind") or "").lower() == S10_SCALAR_RESULT_MULTIPLIER
+        )
 
     @staticmethod
     def _ror64(value: int, count: int):
@@ -962,6 +1391,14 @@ class StatForge:
         return b"\x48\xbb" + struct.pack("<d", float(value))
 
     def _hero_module(self, module_name: str):
+        if module_name.lower() == PROCESS_NAME.lower():
+            cached = getattr(self, "_main_module_cache", None)
+            if cached:
+                return cached
+            module = resolve_main_module(self.pm, PROCESS_NAME)
+            if module:
+                self._main_module_cache = module
+            return module
         modules = list_modules(self.pm.process_id)
         return next((m for m in modules if m["name"].lower() == module_name.lower()), None)
 
@@ -1108,6 +1545,18 @@ class StatForge:
         prefix = code[max(0, jump_offset - 3):jump_offset]
         return any(prefix.endswith(test) for test in S10_BOOL_TEST_SUFFIXES)
 
+    @staticmethod
+    def _is_s10_exp_factor_store(raw: bytes) -> bool:
+        """Match MOVSD [rsp+0x40], xmmN for the verified EXP factor slot."""
+        return bool(
+            len(raw) == 7
+            and raw[0] == 0xF2
+            and 0x40 <= raw[1] <= 0x4F
+            and raw[2:4] == b"\x0f\x11"
+            and (raw[4] & 0xC7) == 0x44
+            and raw[5:7] == b"\x24\x40"
+        )
+
     def _resolve_s10_exp_factor_site(self, binding: StatBinding):
         resolver = binding.resolver or {}
         module_name = str(resolver.get("module") or PROCESS_NAME)
@@ -1127,11 +1576,63 @@ class StatForge:
         while position >= 0:
             positions.append(position)
             position = code.find(context, position + 1)
-        if len(positions) != 1:
-            raise RuntimeError(f"S10 EXP factor store must be unique; found {len(positions)} matches")
+
         store = bytes.fromhex(str(resolver.get("store_hex") or S10_EXP_FACTOR_STORE.hex(" ")))
-        site = function_address + positions[0]
-        if code[positions[0]:positions[0] + len(store)] != store:
+        if len(positions) == 1:
+            position = positions[0]
+        elif not positions:
+            # Hero Siege 7.0.5.0 assigns the same native 1.0 EXP factor to
+            # XMM9 instead of XMM11.  Resolve the operation semantically: a
+            # RIP-relative MOVSD loading the double 1.0 into an XMM register,
+            # followed by that register being stored to the factor RValue at
+            # [rsp+0x40] immediately before the same ownership-bit update.
+            semantic_positions = []
+            for candidate in range(0, max(0, len(code) - 10)):
+                if code[candidate] != 0xF2 or not (0x40 <= code[candidate + 1] <= 0x4F):
+                    continue
+                if code[candidate + 2:candidate + 4] != b"\x0f\x11":
+                    continue
+                rex = code[candidate + 1]
+                modrm = code[candidate + 4]
+                if (modrm & 0xC7) != 0x44 or code[candidate + 5:candidate + 7] != b"\x24\x40":
+                    continue
+                if code[candidate + 7:candidate + 10] != b"\x83\xce\x10":
+                    continue
+                stored_register = ((modrm >> 3) & 7) + (8 if rex & 0x04 else 0)
+                loaded_one = False
+                for load_at in range(0, candidate):
+                    if code[load_at] != 0xF2 or not (0x40 <= code[load_at + 1] <= 0x4F):
+                        continue
+                    if code[load_at + 2:load_at + 4] != b"\x0f\x10":
+                        continue
+                    load_rex = code[load_at + 1]
+                    load_modrm = code[load_at + 4]
+                    if (load_modrm & 0xC7) != 0x05:
+                        continue
+                    loaded_register = ((load_modrm >> 3) & 7) + (8 if load_rex & 0x04 else 0)
+                    if loaded_register != stored_register:
+                        continue
+                    relative = struct.unpack_from("<i", code, load_at + 5)[0]
+                    constant_rva = function_address - module["base"] + load_at + 9 + relative
+                    constant_raw = self._read_module_file_bytes(module, constant_rva, 8)
+                    if len(constant_raw) == 8 and struct.unpack("<d", constant_raw)[0] == 1.0:
+                        loaded_one = True
+                        break
+                if loaded_one:
+                    semantic_positions.append(candidate)
+            if len(semantic_positions) != 1:
+                raise RuntimeError(
+                    "S10 EXP factor store must be unique; "
+                    f"found {len(semantic_positions)} semantic matches"
+                )
+            position = semantic_positions[0]
+            store = code[position:position + 7]
+            context = store + b"\x83\xce\x10"
+        else:
+            raise RuntimeError(f"S10 EXP factor store must be unique; found {len(positions)} matches")
+
+        site = function_address + position
+        if code[position:position + len(store)] != store or not self._is_s10_exp_factor_store(store):
             raise RuntimeError("S10 EXP factor store bytes do not match the verified build")
         live_context = self._read_raw(site, len(context))
         live_is_owned_proxy = (
@@ -1484,7 +1985,9 @@ class StatForge:
     @staticmethod
     def _build_s10_stat_return_patch(value: float):
         # GameMaker YYC script ABI: R8 points to the 16-byte result RValue.
-        # Return a real (kind 13, flags 0) without touching the script's callers.
+        # VALUE_REAL is kind 0.  The older kind 13 patch was VALUE_BOOL, which
+        # made large Magic Find / Movement Speed values collapse to true/1 in
+        # callers that honored the RValue type tag.
         value_bits = struct.unpack("<Q", struct.pack("<d", float(value)))[0]
         return (
             b"\x48\xb8" + struct.pack("<Q", value_bits)
@@ -1494,21 +1997,26 @@ class StatForge:
     @staticmethod
     def _is_supported_s10_stat_entry(raw: bytes):
         for prefix in S10_STAT_ENTRY_PREFIXES:
-            expected = prefix + S10_STAT_ENTRY_PUSHES
-            if not raw.startswith(expected):
-                continue
-            # The stack displacement may change between builds, while this LEA
-            # shape and the YYC argument-save/push sequence remain stable.
-            tail = raw[len(expected):]
-            if tail.startswith(b"\x48\x8d") and len(tail) >= 3 and tail[2] in (0xA8, 0xAC):
-                return True
+            for pushes in S10_STAT_ENTRY_PUSH_VARIANTS:
+                expected = prefix + pushes
+                if not raw.startswith(expected):
+                    continue
+                # The stack displacement may change between builds, while this
+                # LEA shape and the YYC argument-save/push sequence remain
+                # stable.
+                tail = raw[len(expected):]
+                if tail.startswith(b"\x48\x8d") and len(tail) >= 3 and tail[2] in (0xA8, 0xAC):
+                    return True
         return False
 
     @staticmethod
     def _is_owned_s10_stat_return_patch(raw: bytes):
         if len(raw) != 10 + len(S10_STAT_RETURN_PATCH_TAIL):
             return False
-        if raw[:2] != b"\x48\xb8" or raw[10:] != S10_STAT_RETURN_PATCH_TAIL:
+        if raw[:2] != b"\x48\xb8" or raw[10:] not in (
+            S10_STAT_RETURN_PATCH_TAIL,
+            S10_STAT_LEGACY_BOOL_RETURN_PATCH_TAIL,
+        ):
             return False
         value = struct.unpack("<d", raw[2:10])[0]
         return math.isfinite(value)
@@ -1541,9 +2049,109 @@ class StatForge:
             )
         return module, site, original
 
+    def _resolve_s10_result_epilogue_site(self, binding: StatBinding, function_name_override: str | None = None):
+        """Find the unique final RValue-pointer load in a native YYC function."""
+        resolver = binding.resolver or {}
+        module_name = str(resolver.get("module") or PROCESS_NAME)
+        module = self._hero_module(module_name)
+        if not module:
+            raise RuntimeError(f"{module_name} is not loaded")
+        functions = self._discover_function_addresses(module)
+        function_name = str(function_name_override or resolver.get("function_name") or "").strip()
+        if not function_name:
+            raise RuntimeError(f"{binding.name}: missing native result function name")
+        function_address = functions.get(function_name)
+        if not function_address:
+            raise RuntimeError(f"{function_name} was not found in the Season 10 runtime table")
+        extent = self._function_extent(function_address, list(functions.values()))
+        code = self._read_module_file_bytes(
+            module,
+            function_address - int(module["base"]),
+            extent,
+        )
+        candidates: list[tuple[int, bytes]] = []
+        # The runtime name table contains only named YYC scripts; anonymous
+        # helper code may sit between two named entries, so the real epilogue
+        # is not guaranteed to be within a small tail window.
+        scan_start = 0
+
+        def has_verified_unwind(end: int) -> bool:
+            tail = code[end:end + 0x90]
+            return bool(
+                b"\xc3" in tail
+                and (
+                    b"\x48\x81\xc4" in tail
+                    or b"\x48\x83\xc4" in tail
+                    or b"\x49\x8b\xe3" in tail
+                )
+            )
+
+        for offset in range(scan_start, max(scan_start, len(code) - 14)):
+            original = code[offset:offset + S10_RESULT_EPILOGUE_PATCH_SIZE]
+            if original[:3] != b"\x48\x8b\x85":
+                continue
+            if code[offset + 7:offset + 11] != b"\x0f\x28\xb4\x24":
+                continue
+            if not has_verified_unwind(offset + 7):
+                continue
+            candidates.append((function_address + offset, original))
+
+        if not candidates:
+            # Several large Season 10 scripts keep the result pointer in R14
+            # or R15.  The hook covers MOV RAX,R14/R15 plus exactly one full
+            # adjacent epilogue instruction so no instruction is split.
+            for offset in range(scan_start, max(scan_start, len(code) - 12)):
+                if code[offset:offset + 2] != b"\x49\x8b" or code[offset + 2] not in (0xC6, 0xC7):
+                    continue
+                replay = code[offset + 3:offset + 7]
+                if replay in (
+                    b"\x0f\x28\xb4\x24",
+                    b"\x4c\x8d\x9c\x24",
+                    b"\x48\x8b\x9c\x24",
+                ):
+                    size = 11
+                elif replay == b"\x48\x8b\x6c\x24":
+                    size = 8
+                else:
+                    continue
+                original = code[offset:offset + size]
+                if not _is_verified_s10_result_prelude(original) or not has_verified_unwind(offset + size):
+                    continue
+                candidates.append((function_address + offset, original))
+        if not candidates:
+            # StatAttackSpeed keeps its huge calculated array in RBX and then
+            # restores XMM6 from the stack.  This exact two-instruction shape
+            # is distinct from ordinary internal MOV RAX,RBX uses.
+            for offset in range(scan_start, max(scan_start, len(code) - 12)):
+                original = code[offset:offset + 11]
+                if original[:7] != b"\x48\x8b\xc3\x0f\x28\xb4\x24":
+                    continue
+                if not has_verified_unwind(offset + 11):
+                    continue
+                candidates.append((function_address + offset, original))
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"{binding.name}: expected one native result epilogue in {function_name}, found {len(candidates)}"
+            )
+        site, original = candidates[0]
+        live = self._read_raw(site, len(original))
+        owned = len(live) == len(original) and live[:1] == b"\xe8" and all(byte == 0x90 for byte in live[5:])
+        if live != original and not owned:
+            raise RuntimeError(f"{binding.name}: native result epilogue contains an unknown patch")
+        return module, site, original
+
     def _resolve_binding_address(self, binding: StatBinding):
         if binding.resolver:
             kind = str(binding.resolver.get("kind") or "").lower()
+            if kind in (
+                S10_ARRAY_RESULT_MULTIPLIER,
+                S10_ARRAY_RESULT_ADDITIVE,
+                S10_SCALAR_RESULT_MULTIPLIER,
+            ):
+                names = binding.resolver.get("function_names") or []
+                first_name = str(names[0]).strip() if names else None
+                _module, site, _original = self._resolve_s10_result_epilogue_site(binding, first_name)
+                return site
             if kind == "ac_dll_table":
                 return self._resolve_ac_dll_table_address(binding, binding.resolver)
             if kind == "s10_exp_factor_proxy":
@@ -1572,6 +2180,18 @@ class StatForge:
 
     def _read_binding_value(self, binding: StatBinding, address: int):
         try:
+            if self._is_s10_result_binding(binding):
+                payload = self.stat_multi_patches.get(binding.key)
+                if not payload:
+                    return 0.0 if self._is_s10_array_additive_binding(binding) else 1.0
+                if "input_value" in payload:
+                    return float(payload["input_value"])
+                hook = (payload.get("hooks") or [payload])[0]
+                raw = self._read_raw(int(hook["data_address"]), 32)
+                native, scaled, counter, factor = struct.unpack("<ddQd", raw)
+                if counter and math.isfinite(native) and math.isfinite(scaled):
+                    return float(factor)
+                return float(payload.get("factor", factor))
             if self._is_ac_dll_table_binding(binding):
                 return self._read_s10_ac_binding(binding)
             if self._is_s10_exp_proxy_binding(binding):
@@ -1696,6 +2316,30 @@ class StatForge:
             return False
         return True
 
+    def _detach_dead_process(self):
+        """Forget runtime-only state after the target process has exited."""
+        old_pid = self.selected_pid
+        try:
+            if self.pm:
+                self.pm.close_process()
+        except Exception:
+            pass
+        self.pm = None
+        self.attached = False
+        self.selected_pid = None
+        self._main_module_cache = None
+        self.function_addresses_cache.clear()
+        self.pe_sections_cache.clear()
+        self.active_stat_keys.clear()
+        self.stat_multi_patches.clear()
+        self.stat_original_bytes.clear()
+        self.stat_frozen_bytes.clear()
+        self.stat_frozen_addresses.clear()
+        self.status.set("Hero_Siege.exe closed. Start the game, then press Attach / Select.")
+        self.details.set("The game process ended. Runtime boosts were discarded with that process.")
+        self.log_line(f"Game process ended (PID {old_pid}); stale runtime state cleared.")
+        self.refresh_status()
+
     def toggle_stat(self, key: str):
         binding = self._find_binding(key)
         if not binding:
@@ -1800,6 +2444,8 @@ class StatForge:
             resolver.get("undefined_offset", AC_DLL_UNDEFINED_OFFSET), "undefined_offset"
         )
         new_value = float(parse_value(value_text, binding.type_name))
+        if not math.isfinite(new_value) or new_value < 0:
+            raise RuntimeError(f"{binding.name}: value must be a finite number greater than or equal to zero")
         if "max" in resolver:
             max_value = float(resolver["max"])
             new_value = min(new_value, max_value)
@@ -2031,6 +2677,164 @@ class StatForge:
         self.details.set(f"{binding.name}: verified S10 rarity proxy restored.")
         self.log_line(f"{binding.name}: OFF | S10 rarity proxy restored.")
 
+    def _enable_s10_result_modifier(self, binding: StatBinding, value_text: str):
+        resolver = binding.resolver or {}
+        input_value = float(parse_value(value_text, binding.type_name))
+        if not math.isfinite(input_value) or input_value < 0:
+            raise RuntimeError(f"{binding.name}: value must be zero or greater")
+        input_value = min(input_value, float(resolver.get("max", binding.slider_max)))
+        input_mode = str(resolver.get("input_mode") or "multiplier").lower()
+        kind = str(resolver.get("kind") or "").lower()
+        additive = kind == S10_ARRAY_RESULT_ADDITIVE or input_mode == "additive"
+        array_result = kind in (S10_ARRAY_RESULT_MULTIPLIER, S10_ARRAY_RESULT_ADDITIVE)
+        modifier = input_value if additive else (1.0 + input_value / 100.0 if input_mode == "bonus_percent" else input_value)
+        if not additive and modifier <= 0:
+            raise RuntimeError(f"{binding.name}: multiplier must be greater than zero")
+
+        raw_names = resolver.get("function_names")
+        if raw_names:
+            function_names = [str(item).strip() for item in raw_names if str(item).strip()]
+        else:
+            name = str(resolver.get("function_name") or "").strip()
+            function_names = [name] if name else []
+        if not function_names:
+            raise RuntimeError(f"{binding.name}: no native result function configured")
+
+        with self.runtime_cache_lock:
+            resolved = []
+            seen_sites = set()
+            for function_name in function_names:
+                _module, site, original = self._resolve_s10_result_epilogue_site(binding, function_name)
+                if site in seen_sites:
+                    raise RuntimeError(f"{binding.name}: duplicate native hook site for {function_name}")
+                seen_sites.add(site)
+                current = self._read_raw(site, len(original))
+                if current != original:
+                    raise RuntimeError(
+                        f"{binding.name}: {function_name} is already occupied; close old StatForge copies or restart the game"
+                    )
+                resolved.append((function_name, site, original))
+
+            hooks = []
+            for function_name, site, original in resolved:
+                cave = self._alloc_near_sites(
+                    [site],
+                    S10_RESULT_HOOK_ALLOCATION_SIZE,
+                    instruction_size=5,
+                )
+                if array_result:
+                    blob = build_s10_array_result_hook_blob(
+                        cave,
+                        original,
+                        modifier,
+                        additive=additive,
+                    )
+                else:
+                    blob = build_s10_scalar_result_hook_blob(cave, original, modifier)
+                patch = build_s10_result_epilogue_patch(cave, site, len(original))
+                self._write_memory(cave, blob)
+                hooks.append({
+                    "function_name": function_name,
+                    "code_site": int(site),
+                    "code_original": bytes(original),
+                    "code_patch": bytes(patch),
+                    "cave": int(cave),
+                    "data_address": int(cave) + S10_RESULT_HOOK_DATA_OFFSET,
+                })
+
+            installed = []
+            try:
+                for hook in hooks:
+                    self._write_code_when_quiescent(hook["code_site"], hook["code_patch"])
+                    if self._read_raw(hook["code_site"], len(hook["code_patch"])) != hook["code_patch"]:
+                        raise RuntimeError(
+                            f"{binding.name}: {hook['function_name']} result hook verification failed"
+                        )
+                    installed.append(hook)
+            except Exception:
+                for hook in reversed(installed):
+                    try:
+                        if self._read_raw(hook["code_site"], len(hook["code_original"])) == hook["code_patch"]:
+                            self._write_code_when_quiescent(hook["code_site"], hook["code_original"])
+                    except Exception:
+                        pass
+                raise
+
+            payload = {
+                "kind": kind,
+                "hooks": hooks,
+                "modifier": float(modifier),
+                "factor": float(modifier),
+                "input_value": float(input_value),
+                "input_mode": input_mode,
+                "additive": bool(additive),
+                "array_result": bool(array_result),
+            }
+            self.stat_multi_patches[binding.key] = payload
+            self.active_stat_keys.add(binding.key)
+            binding.default_write = str(int(input_value) if input_value.is_integer() else input_value)
+            self._save_bindings()
+
+        current_var = self.stat_current_vars.get(binding.key)
+        if additive:
+            summary = f"native + {modifier:g}"
+        elif input_mode == "bonus_percent":
+            summary = f"native + {input_value:g}% (× {modifier:g})"
+        else:
+            summary = f"native × {modifier:g}"
+        if current_var:
+            current_var.set(f"Current: {summary} (waiting for game call)")
+        self.details.set(f"{binding.name}: {summary} will be applied to the game's final native result.")
+        sites_text = ", ".join(hex(hook["code_site"]) for hook in hooks)
+        self.log_line(
+            f"{binding.name}: ON | {summary} @ {sites_text} | "
+            f"{len(hooks)} verified native function(s)"
+        )
+
+    def _disable_s10_result_modifier(self, binding: StatBinding):
+        with self.runtime_cache_lock:
+            payload = self.stat_multi_patches.get(binding.key)
+            if payload:
+                hooks = list(payload.get("hooks") or [payload])
+                array_result = bool(payload.get("array_result", self._is_s10_array_result_binding(binding)))
+                if array_result:
+                    for hook in hooks:
+                        data = int(hook["data_address"])
+                        try:
+                            before = struct.unpack("<Q", self._read_raw(data + 0x38, 8))[0]
+                            self._write_memory(data + 0x30, struct.pack("<Q", 0))
+                            deadline = time.time() + 0.35
+                            while time.time() < deadline:
+                                after = struct.unpack("<Q", self._read_raw(data + 0x38, 8))[0]
+                                if after != before:
+                                    break
+                                time.sleep(0.01)
+                        except Exception:
+                            pass
+                for hook in reversed(hooks):
+                    site = int(hook["code_site"])
+                    original = bytes(hook["code_original"])
+                    patch = bytes(hook["code_patch"])
+                    current = self._read_raw(site, len(original))
+                    if current == patch:
+                        self._write_code_when_quiescent(site, original)
+                    elif current != original:
+                        raise RuntimeError(
+                            f"{binding.name}: {hook.get('function_name', 'result hook')} is no longer owned by StatForge"
+                        )
+                    if self._read_raw(site, len(original)) != original:
+                        raise RuntimeError(
+                            f"{binding.name}: {hook.get('function_name', 'native result')} restore verification failed"
+                        )
+            self.stat_multi_patches.pop(binding.key, None)
+            self.active_stat_keys.discard(binding.key)
+
+        current_var = self.stat_current_vars.get(binding.key)
+        if current_var:
+            current_var.set("Current: native calculation")
+        self.details.set(f"{binding.name}: native game calculation restored.")
+        self.log_line(f"{binding.name}: OFF | all native result hooks restored.")
+
     def _enable_stat(self, binding: StatBinding):
         if not self._require():
             return
@@ -2039,6 +2843,9 @@ class StatForge:
             self.log_line(f"{binding.name}: enter a value first.")
             return
         try:
+            if self._is_s10_result_binding(binding):
+                self._enable_s10_result_modifier(binding, value_text)
+                return
             if self._is_ac_dll_table_binding(binding):
                 self._enable_s10_ac_stat(binding, value_text)
                 return
@@ -2103,6 +2910,9 @@ class StatForge:
         if not self._require():
             return
         try:
+            if self._is_s10_result_binding(binding):
+                self._disable_s10_result_modifier(binding)
+                return
             if self._is_ac_dll_table_binding(binding):
                 self._disable_s10_ac_stat(binding)
                 return
@@ -2138,6 +2948,72 @@ class StatForge:
         except Exception as exc:
             self.details.set(f"{binding.name}: restore failed - {exc}")
             self.log_line(f"{binding.name}: disable failed: {exc}")
+
+    def _poll_result_telemetry(self):
+        """Show evidence from the game calls instead of only reporting a patch write."""
+        try:
+            now = time.time()
+            if self.attached and self.selected_pid and now - self._last_process_liveness_check >= 1.0:
+                self._last_process_liveness_check = now
+                live_pids = {pid for pid, _name in list_processes()}
+                if self.selected_pid not in live_pids:
+                    self._detach_dead_process()
+                    return
+            if self.attached and self.pm:
+                for key, payload in list(self.stat_multi_patches.items()):
+                    if payload.get("kind") not in (
+                        S10_ARRAY_RESULT_MULTIPLIER,
+                        S10_ARRAY_RESULT_ADDITIVE,
+                        S10_SCALAR_RESULT_MULTIPLIER,
+                    ):
+                        continue
+                    hooks = list(payload.get("hooks") or [payload])
+                    changed = []
+                    for hook in hooks:
+                        raw = self._read_raw(int(hook["data_address"]), 32)
+                        native, modified, counter, modifier = struct.unpack("<ddQd", raw)
+                        previous = int(hook.get("last_counter", 0))
+                        if not counter or counter == previous:
+                            continue
+                        hook["last_counter"] = int(counter)
+                        if not (math.isfinite(native) and math.isfinite(modified)):
+                            continue
+                        changed.append((hook, native, modified, counter, modifier, previous))
+                    if not changed:
+                        continue
+
+                    additive = bool(payload.get("additive"))
+                    operation = "+" if additive else "×"
+                    displays = []
+                    for hook, native, modified, counter, modifier, _previous in changed:
+                        function_name = str(hook.get("function_name") or "game")
+                        label = function_name.removeprefix("gml_Script_Stat").removeprefix("gml_Script_")
+                        displays.append(
+                            f"{label}: {native:g} {operation} {modifier:g} = {modified:g} ({counter})"
+                        )
+                    current_var = self.stat_current_vars.get(key)
+                    if current_var:
+                        current_var.set("Current: " + " | ".join(displays))
+
+                    binding = self._find_binding(key)
+                    name = binding.name if binding else key
+                    for hook, native, modified, counter, modifier, previous in changed:
+                        if previous == 0:
+                            self.log_line(
+                                f"{name}: LIVE {hook.get('function_name', 'game')} | "
+                                f"{native:g} {operation} {modifier:g} = {modified:g}; "
+                                f"game function called {counter} time(s)."
+                            )
+        except Exception as exc:
+            try:
+                self.log_line(f"Telemetry warning: {exc}")
+            except Exception:
+                pass
+        finally:
+            try:
+                self.root.after(250, self._poll_result_telemetry)
+            except Exception:
+                pass
 
     def _freeze_loop(self):
         while True:
@@ -2276,20 +3152,45 @@ class StatForge:
         return selected["process"]
 
     def attach_to_process(self, process):
+        pm = None
         try:
             pid, name = process
-            self.pm = pymem.Pymem(pid)
+            pm = pymem.Pymem(pid)
+            try:
+                main_module = resolve_main_module(pm, PROCESS_NAME)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Hero_Siege.exe memory is not readable. Fully close the game, launch Without EAC, "
+                    "and accept StatForge's administrator prompt."
+                ) from exc
+            if not main_module:
+                raise RuntimeError(
+                    "Hero_Siege.exe main module could not be resolved. Fully close duplicate game processes "
+                    "and relaunch Without EAC."
+                )
+            self.pm = pm
             self.attached = True
             self.function_addresses_cache.clear()
+            self.pe_sections_cache.clear()
+            self._main_module_cache = main_module
             self.selected_pid = pid
             self.selected_process_name = name
             self.status.set(f"Attached: {name} (PID {pid})")
             self._sync_status_indicator()
-            self.log_line(f"Attached: {name} PID={pid}.")
+            self.log_line(
+                f"Attached: {name} PID={pid} | base=0x{main_module['base']:x} "
+                f"via {main_module.get('source', 'module resolver')}."
+            )
             return True
         except Exception as exc:
+            if pm:
+                try:
+                    pm.close_process()
+                except Exception:
+                    pass
             self.pm = None
             self.attached = False
+            self._main_module_cache = None
             self.status.set(f"Attach failed: {exc}")
             self._sync_status_indicator()
             self.log_line(f"Attach failed: {exc}")

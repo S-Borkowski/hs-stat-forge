@@ -1,41 +1,56 @@
-# HS Offline Stat Forge
+HS Offline Stat Forge v2.3.0
+============================
 
-Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player characters.
+Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player play.
 
-> Current release: **v2.2.0 — Adaptive Build Resolver**
-
-## Season 10 boosts
-
-- Magic Find
-- Movement Speed
+Boosts
+------
+- Magic Find Multiplier (scales the native final value)
+- Movement Speed Multiplier (scales the native final value)
 - All Skills
-- EXP Multiplier
+- EXP Multiplier (multiplies the game's final experience reward)
+- Total Damage Bonus (%)
+- Attack Speed Bonus (%) from the live aggregate attack-timing value
+- Faster Cast Rate Bonus (adds points instead of multiplying zero)
+- Skill Haste Bonus (adds cooldown-recovery points to the native value)
+- Defense Bonus (%)
+- Critical Strike Chance and Damage Bonus (%)
+- Spell Critical Chance and Damage Bonus (%)
 
-The verified Season 10 routes override native runtime results in memory. The game executable on disk is never modified. Every active change can be reverted with **Restore All** and the application also restores active changes when it closes normally.
+Quick start
+-----------
+1. Launch Hero Siege without Easy Anti-Cheat and enter offline mode.
+2. Run HSStatForge.exe and accept the administrator prompt.
+3. Choose Attach / Select.
+4. Set a value and enable the desired boost.
+5. Use Restore All before leaving the game to return to native values.
 
-Version 2.2.0 no longer allow-lists one exact `Hero_Siege.exe` hash. It resolves each named GameMaker function at runtime and validates the target's native YYC instruction layout before writing. Compatible builds can move code without breaking StatForge; genuinely changed layouts are still rejected safely.
+Compatibility
+-------------
+- StatForge no longer requires one exact Hero_Siege.exe SHA-256 hash.
+- Main-module discovery falls back from Toolhelp to Pymem and the native PEB.
+- It locates named Season 10 functions at runtime and validates each target's
+  native YYC entry layout before writing.
+- Magic Find and Movement Speed hook the native Stat* result arrays and scale
+  element zero, which is the value the game actually consumes.
+- EXP scales the completed EnemyCalculateExperience return value.
+- Percentage bonus controls use `native × (1 + bonus / 100)`, so +100% doubles
+  the native value. Faster Cast Rate and Skill Haste add points directly.
+- RSP-relative native epilogues are replayed with CALL-stack compensation.
+- Attack Speed scales the scalar `StatAttackSpeed` result used by gameplay;
+  the hand-specific detail arrays are intentionally not patched.
+- The panel and hs_statforge.log show native value, scaled value and actual
+  game-call counts, so a written patch is not mistaken for a working stat.
+- Unsupported layouts are rejected without a write.
+- Live apply/restore verification passed on Steam Hero Siege 7.0.5.0.
 
-## Quick start
+Important
+---------
+- Offline/single-player use only.
+- Do not use with multiplayer, online characters, leaderboards, trading, or EAC.
+- Hero_Siege.exe on disk is never modified.
+- Keep hs_statforge_stats.json beside HSStatForge.exe.
 
-1. Download `HS-Offline-Stat-Forge-v2.2.0.zip` from the latest release.
-2. Extract the full archive to a normal folder.
-3. Start Hero Siege with **Launch Without EAC**, then enter offline/single-player mode.
-4. Run `HSStatForge.exe` and accept the administrator prompt.
-5. Choose **Attach / Select**, set a value and enable the desired boost.
-6. Use **Restore All** before leaving the game if you want to return to native values immediately.
-
-Keep `hs_statforge_stats.json` next to the executable. Value choices are saved locally in this file.
-
-## Compatibility and safety
-
-- Designed only for Hero Siege Season 10 offline/single-player use.
-- Do not use it with multiplayer, online characters, leaderboards, trading or anti-cheat protected modes.
-- Magic Find, Movement Speed and All Skills resolve by exact function name plus validated YYC entry structure.
-- EXP Multiplier resolves by a unique instruction context and uses private runtime proxy memory.
-- Read-only compatibility tests pass against Hero Siege 7.0.0 and Steam 7.0.2.
-- A changed target layout is rejected instead of receiving an unsafe patch.
-- Antivirus products may flag unsigned memory-editing tools heuristically. Verify the downloaded files against `SHA256SUMS.txt`.
-
-## Source
-
-The Python sources used for the packaged executable are included in this repository.
+Developer research
+------------------
+- See STATFORGE_S10_REAL_STAT_HOOK_NOTES.md before adding another stat.

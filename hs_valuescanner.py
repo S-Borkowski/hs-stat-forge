@@ -105,6 +105,16 @@ class MODULEENTRY32(ctypes.Structure):
         ("szExePath",     wintypes.WCHAR * MAX_PATH),
     ]
 
+
+class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("Reserved1", ctypes.c_void_p),
+        ("PebBaseAddress", ctypes.c_void_p),
+        ("Reserved2", ctypes.c_void_p * 2),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("Reserved3", ctypes.c_void_p),
+    ]
+
 class THREADENTRY32(ctypes.Structure):
     _fields_ = [
         ("dwSize", wintypes.DWORD),
@@ -230,8 +240,24 @@ class DEBUG_EVENT(ctypes.Structure):
     ]
 
 kernel32 = ctypes.windll.kernel32
+ntdll = ctypes.windll.ntdll
 TH32CS_SNAPMODULE   = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
+kernel32.QueryFullProcessImageNameW.argtypes = (
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    wintypes.LPWSTR,
+    ctypes.POINTER(wintypes.DWORD),
+)
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+ntdll.NtQueryInformationProcess.argtypes = (
+    wintypes.HANDLE,
+    wintypes.ULONG,
+    ctypes.c_void_p,
+    wintypes.ULONG,
+    ctypes.POINTER(wintypes.ULONG),
+)
+ntdll.NtQueryInformationProcess.restype = ctypes.c_long
 kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(THREADENTRY32))
 kernel32.Thread32First.restype = wintypes.BOOL
 kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(THREADENTRY32))
@@ -305,6 +331,123 @@ def list_modules(pid):
         kernel32.CloseHandle(snapshot)
 
     return modules
+
+
+def _module_base_value(module):
+    value = getattr(module, "lpBaseOfDll", 0)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(ctypes.cast(value, ctypes.c_void_p).value or 0)
+    except Exception:
+        return 0
+
+
+def _process_image_path_from_handle(process_handle):
+    size = wintypes.DWORD(32768)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if kernel32.QueryFullProcessImageNameW(process_handle, 0, buffer, ctypes.byref(size)):
+        return buffer.value
+    return ""
+
+
+def _image_size_from_memory(process_handle, image_base):
+    header = pymem.memory.read_bytes(process_handle, image_base, 0x1000)
+    if header[:2] != b"MZ":
+        raise RuntimeError("main image does not contain an MZ header")
+    pe_offset = struct.unpack_from("<I", header, 0x3C)[0]
+    required = pe_offset + 24 + 60
+    if required > len(header):
+        header = pymem.memory.read_bytes(process_handle, image_base, required)
+    if header[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+        raise RuntimeError("main image does not contain a PE header")
+    optional_offset = pe_offset + 24
+    return struct.unpack_from("<I", header, optional_offset + 56)[0]
+
+
+def _peb_image_base(process_handle):
+    """Return the native 64-bit image base without using a module snapshot."""
+    info = PROCESS_BASIC_INFORMATION()
+    returned = wintypes.ULONG()
+    status = ntdll.NtQueryInformationProcess(
+        process_handle,
+        0,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        ctypes.byref(returned),
+    )
+    if status != 0 or not info.PebBaseAddress:
+        return 0
+    raw = pymem.memory.read_bytes(process_handle, int(info.PebBaseAddress) + 0x10, 8)
+    return struct.unpack("<Q", raw)[0]
+
+
+def resolve_main_module(pm, expected_name=PROCESS_NAME):
+    """Resolve the process image through Toolhelp, Pymem, then the PEB.
+
+    The fallback is version-independent: it asks Windows for the process image
+    base and validates the in-memory PE header instead of relying on one module
+    enumeration API.
+    """
+    expected_lower = expected_name.lower()
+    candidates = []
+    for module in list_modules(pm.process_id):
+        if str(module.get("name") or "").lower() == expected_lower:
+            candidates.append((module, "Toolhelp"))
+            break
+
+    for finder_name, finder in (
+        ("Pymem module", lambda: pymem.process.module_from_name(pm.process_handle, expected_name)),
+        ("Pymem base", lambda: pymem.process.base_module(pm.process_handle)),
+    ):
+        try:
+            module = finder()
+            if module:
+                candidates.append(({
+                    "name": str(getattr(module, "name", "") or expected_name),
+                    "base": _module_base_value(module),
+                    "size": int(getattr(module, "SizeOfImage", 0) or 0),
+                    "path": str(getattr(module, "filename", "") or ""),
+                }, finder_name))
+        except Exception:
+            pass
+
+    try:
+        peb_base = _peb_image_base(pm.process_handle)
+        if peb_base:
+            candidates.append(({
+                "name": expected_name,
+                "base": peb_base,
+                "size": 0,
+                "path": _process_image_path_from_handle(pm.process_handle),
+            }, "PEB"))
+    except Exception:
+        pass
+
+    seen = set()
+    last_error = None
+    for module, source in candidates:
+        base = int(module.get("base") or 0)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        try:
+            size = int(module.get("size") or 0) or _image_size_from_memory(pm.process_handle, base)
+            if pymem.memory.read_bytes(pm.process_handle, base, 2) != b"MZ":
+                continue
+            path = str(module.get("path") or "") or _process_image_path_from_handle(pm.process_handle)
+            return {
+                "name": expected_name,
+                "base": base,
+                "size": size,
+                "path": path,
+                "source": source,
+            }
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise RuntimeError(f"main module memory is not readable: {last_error}") from last_error
+    return None
 
 def list_threads(pid):
     threads = []

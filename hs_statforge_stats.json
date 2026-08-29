@@ -1,33 +1,35 @@
 {
-    "version": 3,
+    "version": 7,
     "season": 10,
     "stats": [
         {
             "key": "magic_find",
-            "name": "Magic Find",
+            "name": "Magic Find Multiplier",
             "type": "Double",
             "addr": "",
-            "default_write": "1000",
+            "default_write": "10",
             "button_color": "#0f766e",
             "slider_max": 1000.0,
             "resolver": {
-                "kind": "s10_stat_return_proxy",
+                "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
-                "function_name": "gml_Script_StatMagicFind"
+                "function_name": "gml_Script_StatMagicFind",
+                "max": 1000
             }
         },
         {
             "key": "movement_speed",
-            "name": "Movement Speed",
+            "name": "Movement Speed Multiplier",
             "type": "Double",
             "addr": "",
-            "default_write": "1000",
+            "default_write": "6",
             "button_color": "#7c3aed",
-            "slider_max": 1000.0,
+            "slider_max": 100.0,
             "resolver": {
-                "kind": "s10_stat_return_proxy",
+                "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
-                "function_name": "gml_Script_StatMovementSpeed"
+                "function_name": "gml_Script_StatMovementSpeed",
+                "max": 100
             }
         },
         {
@@ -53,12 +55,154 @@
             "button_color": "#be123c",
             "slider_max": 100.0,
             "resolver": {
-                "kind": "s10_exp_factor_proxy",
+                "kind": "s10_scalar_result_multiplier",
                 "module": "Hero_Siege.exe",
                 "function_name": "gml_Script_EnemyCalculateExperience",
-                "context_hex": "f2 44 0f 11 5c 24 40 83 ce 10",
-                "store_hex": "f2 44 0f 11 5c 24 40",
                 "max": 100
+            }
+        },
+        {
+            "key": "total_damage_bonus",
+            "name": "Total Damage Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "693",
+            "button_color": "#dc2626",
+            "slider_max": 1000.0,
+            "resolver": {
+                "kind": "s10_scalar_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_CalculateEndDamage",
+                "input_mode": "bonus_percent",
+                "max": 1000
+            }
+        },
+        {
+            "key": "attack_speed_bonus",
+            "name": "Attack Speed Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "500",
+            "button_color": "#ea580c",
+            "slider_max": 500.0,
+            "resolver": {
+                "kind": "s10_scalar_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatAttackSpeed",
+                "input_mode": "bonus_percent",
+                "max": 500
+            }
+        },
+        {
+            "key": "faster_cast_rate_bonus",
+            "name": "Faster Cast Rate Bonus",
+            "type": "Double",
+            "addr": "",
+            "default_write": "365",
+            "button_color": "#d97706",
+            "slider_max": 500.0,
+            "resolver": {
+                "kind": "s10_array_result_additive",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatFasterCastRate",
+                "input_mode": "additive",
+                "max": 500
+            }
+        },
+        {
+            "key": "defense_bonus",
+            "name": "Defense Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "450",
+            "button_color": "#2563eb",
+            "slider_max": 1000.0,
+            "resolver": {
+                "kind": "s10_array_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatDefense",
+                "input_mode": "bonus_percent",
+                "max": 1000
+            }
+        },
+        {
+            "key": "critical_strike_damage_bonus",
+            "name": "Critical Strike Damage Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "1000",
+            "button_color": "#be123c",
+            "slider_max": 1000.0,
+            "resolver": {
+                "kind": "s10_array_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatCritDamage",
+                "input_mode": "bonus_percent",
+                "max": 1000
+            }
+        },
+        {
+            "key": "critical_strike_chance_bonus",
+            "name": "Critical Strike Chance Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "322",
+            "button_color": "#db2777",
+            "slider_max": 500.0,
+            "resolver": {
+                "kind": "s10_array_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatCritRate",
+                "input_mode": "bonus_percent",
+                "max": 500
+            }
+        },
+        {
+            "key": "spell_critical_damage_bonus",
+            "name": "Spell Critical Damage Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "478",
+            "button_color": "#9333ea",
+            "slider_max": 1000.0,
+            "resolver": {
+                "kind": "s10_array_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatSpellCritDamage",
+                "input_mode": "bonus_percent",
+                "max": 1000
+            }
+        },
+        {
+            "key": "spell_critical_chance_bonus",
+            "name": "Spell Critical Chance Bonus (%)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "235",
+            "button_color": "#7c3aed",
+            "slider_max": 500.0,
+            "resolver": {
+                "kind": "s10_array_result_multiplier",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatSpellCritRate",
+                "input_mode": "bonus_percent",
+                "max": 500
+            }
+        },
+        {
+            "key": "skill_haste_bonus",
+            "name": "Skill Haste Bonus",
+            "type": "Double",
+            "addr": "",
+            "default_write": "311",
+            "button_color": "#0891b2",
+            "slider_max": 500.0,
+            "resolver": {
+                "kind": "s10_array_result_additive",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatSpellHaste",
+                "input_mode": "additive",
+                "max": 500
             }
         }
     ]
