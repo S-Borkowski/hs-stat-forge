@@ -1,3 +1,27 @@
+# HS Offline Stat Forge v2.4.2 — Safe Monster Density
+
+## Fixed
+
+- Fixed the freeze/crash that could occur when 5x Monster Density exhausted
+  Hero Siege's fixed protected-variable pool.
+- Density now measures the live pool and safely stops extra creators before
+  the game reaches its hard limit.
+- Added a separate burst limiter for game builds where the pool layout cannot
+  be verified safely.
+- The panel now displays pool use and how many extra creators were safely
+  skipped.
+
+## Live verification
+
+- Tested at 5x density across three consecutive combat-map transitions.
+- Observed 468 native creator routes and 1,872 extra creators.
+- Final protected-pool use was 179,770 / 262,144; Hero Siege remained open and
+  responsive, the runtime unloaded cleanly, and Windows recorded no new crash.
+
+Offline/single-player only. Launch Hero Siege without EAC.
+
+---
+
 # HS Offline Stat Forge v2.4.1 — Fast Density Startup
 
 ## Improved

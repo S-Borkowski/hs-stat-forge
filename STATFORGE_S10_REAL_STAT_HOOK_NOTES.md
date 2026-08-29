@@ -184,3 +184,28 @@ Crit Chance `25×4.22=105.5`, Crit Damage `80.9×11=889.9`, Spell Crit Chance
 fonksiyonda çağrı aldı fakat test çağrılarının native değeri sıfırdı; non-zero
 combat hit ayrıca teyit edilmelidir. Attack Speed için önceki iki-el array
 yaklaşımı tür kontrolünde her çağrıyı atladığı için kaldırıldı.
+
+## 7.0.5.0 monster-density çökme sınırı
+
+30 Ağustos 2026 tarihinde 5x density sonrasında oluşan access violation'ın
+StatForge taramasıyla ilgisi olmadığı doğrulandı. `ac_dll_gm.dll` içindeki
+korumalı değişken havuzu doluyor ve `SetVariable` RVA `0x1424` noktasında boş
+entry işaretçisine yazmaya çalışıyordu.
+
+- `ac_dll_gm.dll` SHA-256:
+  `EA33261A54BA922B4074AE211990087C3A74FA840EAD44AB30F0C74E504C505A`
+- PE timestamp: `0x6A844148`; image size: `0xA0A000`.
+- Havuz: 512 sayfa × 512 entry = 262,144 entry.
+- Sayfa boyutu `0x5008`, entry boyutu `0x28`, ilk tablo RVA `0x5688`.
+- Entry kullanım bayrağı `entry+0x10`.
+- Normal menü başlangıcında yaklaşık 163 bin entry zaten kullanılıyor.
+
+Density runtime bu düzeni PE başlığı ve `SetVariable` byte imzasıyla doğrular.
+Doğrulanırsa canlı doluluğu ölçer ve 200,000 kullanımda ek creator üretimini
+durdurur; böylece oyun için 62,144 entry rezerve kalır. Ayrıca tüm build'lerde
+saniyede en fazla 800 ek creator oluşturulur. Bilinmeyen `ac_dll_gm.dll`
+düzenlerinde adres tahmini yapılmaz; yalnız build-bağımsız burst sınırı kalır.
+
+Canlı 5x testi üç ardışık savaş haritasında 468 native creator ve 1,872 ek
+creator gözledi. Son doluluk 179,770 / 262,144 idi; oyun açık ve yanıt verir
+kaldı, DLL temiz kaldırıldı ve Windows yeni çökme kaydı üretmedi.

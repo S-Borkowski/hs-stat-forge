@@ -48,7 +48,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.4.1-s10-fast-density"
+APP_TITLE = "HS Offline Stat Forge v2.4.2-s10-safe-density"
 
 
 def runtime_app_dir():
@@ -143,7 +143,7 @@ S10_RESULT_HOOK_ALLOCATION_SIZE = 0x1000
 DENSITY_RESOLVER = "s10_standalone_density"
 DENSITY_DLL_NAME = "HSStatForgeDensity.dll"
 DENSITY_MAGIC = 0x44465348
-DENSITY_VERSION = 2
+DENSITY_VERSION = 3
 DENSITY_STATUS_READY = 2
 DENSITY_STATUS_ERROR = 3
 # Exact-build hints skip the expensive GameMaker heap catalog scan. Unknown
@@ -198,13 +198,13 @@ class DensitySharedState(ctypes.Structure):
         ("enabled", ctypes.c_long),
         ("shutdown", ctypes.c_long),
         ("last_error", ctypes.c_long),
-        ("reserved0", ctypes.c_uint32),
+        ("protected_pool_used", ctypes.c_long),
         ("multiplier", ctypes.c_double),
         ("depth_address", ctypes.c_uint64),
         ("layer_address", ctypes.c_uint64),
         ("creator_count", ctypes.c_uint32),
         ("creator_indices", ctypes.c_int32 * 16),
-        ("reserved1", ctypes.c_uint32),
+        ("capacity_skips", ctypes.c_long),
         ("host_heartbeat", ctypes.c_longlong),
         ("depth_calls", ctypes.c_longlong),
         ("layer_calls", ctypes.c_longlong),
@@ -746,7 +746,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.4.1  •  FAST STANDALONE DENSITY",
+            text="v2.4.2  •  SAFE STANDALONE DENSITY",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -3051,6 +3051,7 @@ class StatForge:
             "kind": DENSITY_RESOLVER,
             "last_creator_matches": int(state.creator_matches),
             "last_extra_creators": int(state.extra_creators),
+            "last_capacity_skips": int(state.capacity_skips),
         }
         self.active_stat_keys.add(binding.key)
         binding.default_write = str(int(multiplier) if multiplier.is_integer() else multiplier)
@@ -3222,19 +3223,29 @@ class StatForge:
                         extras = int(self.density_state.extra_creators)
                         previous_matches = int(density_payload.get("last_creator_matches", 0))
                         previous_extras = int(density_payload.get("last_extra_creators", 0))
-                        if matches != previous_matches or extras != previous_extras:
+                        capacity_skips = int(self.density_state.capacity_skips)
+                        previous_skips = int(density_payload.get("last_capacity_skips", 0))
+                        if (matches != previous_matches or extras != previous_extras or
+                                capacity_skips != previous_skips):
                             density_payload["last_creator_matches"] = matches
                             density_payload["last_extra_creators"] = extras
+                            density_payload["last_capacity_skips"] = capacity_skips
                             current_var = self.stat_current_vars.get("monster_density")
                             if current_var:
+                                guard = ""
+                                if self.density_state.protected_pool_used:
+                                    guard = f" | pool {self.density_state.protected_pool_used}/262144"
+                                if capacity_skips:
+                                    guard += f" | safely capped {capacity_skips}"
                                 current_var.set(
                                     f"Current: {self.density_state.multiplier:g}x | "
-                                    f"creators {matches} | extras {extras}"
+                                    f"creators {matches} | extras {extras}{guard}"
                                 )
                             if extras > previous_extras:
                                 self.log_line(
                                     f"Monster Density Multiplier: LIVE | creator routes {matches}, "
-                                    f"extra creators {extras}."
+                                    f"extra creators {extras}, pool {self.density_state.protected_pool_used}/262144, "
+                                    f"safely capped {capacity_skips}."
                                 )
                 for key, payload in list(self.stat_multi_patches.items()):
                     if payload.get("kind") not in (

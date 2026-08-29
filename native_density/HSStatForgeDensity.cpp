@@ -17,8 +17,11 @@
 namespace
 {
 constexpr std::uint32_t kMagic = 0x44465348; // HSFD
-constexpr std::uint32_t kVersion = 2;
+constexpr std::uint32_t kVersion = 3;
 constexpr std::size_t kMaxCreators = 16;
+constexpr std::uint32_t kProtectedPoolCapacity = 512U * 512U;
+constexpr std::uint32_t kProtectedPoolSafeUsed = kProtectedPoolCapacity - 62144U;
+constexpr LONG kMaxExtraCreatorsPerSecond = 800;
 
 enum RuntimeStatus : std::uint32_t
 {
@@ -39,13 +42,13 @@ struct SharedState
     volatile LONG enabled;
     volatile LONG shutdown;
     volatile LONG lastError;
-    std::uint32_t reserved0;
+    volatile LONG protectedPoolUsed;
     alignas(8) double multiplier;
     std::uint64_t depthAddress;
     std::uint64_t layerAddress;
     std::uint32_t creatorCount;
     std::int32_t creatorIndices[kMaxCreators];
-    std::uint32_t reserved1;
+    volatile LONG capacitySkips;
     volatile LONG64 hostHeartbeat;
     volatile LONG64 depthCalls;
     volatile LONG64 layerCalls;
@@ -80,6 +83,10 @@ std::array<int, kMaxCreators> gCreators{};
 std::size_t gCreatorCount = 0;
 std::atomic<std::uint64_t> gFractionSequence{0};
 thread_local bool gInsideDensityCopy = false;
+const std::uint8_t* gProtectedPoolEntries = nullptr;
+LONG gPoolScanCountdown = 0;
+ULONGLONG gRateWindowStart = 0;
+LONG gRateWindowCopies = 0;
 
 constexpr std::array<const char*, 7> kCreatorNames{
     "Enemy_Creator_Ambush_obj",
@@ -122,6 +129,74 @@ bool IsExecutableAddress(std::uintptr_t address)
     const DWORD base = info.Protect & 0xFF;
     return base == PAGE_EXECUTE || base == PAGE_EXECUTE_READ ||
            base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool SafeEqual(const void* left, const void* right, std::size_t size);
+
+bool InitializeProtectedPoolGuard()
+{
+    const HMODULE module = GetModuleHandleW(L"ac_dll_gm.dll");
+    if (!module) return false;
+    const auto* base = reinterpret_cast<const std::uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.TimeDateStamp != 0x6A844148U ||
+        nt->OptionalHeader.SizeOfImage != 0x00A0A000U)
+        return false;
+    constexpr std::array<std::uint8_t, 26> setSignature{
+        0x48, 0x8B, 0x03,
+        0x4C, 0x8D, 0x4C, 0x24, 0x20,
+        0x66, 0x48, 0x0F, 0x7E, 0xF1,
+        0x41, 0xB8, 0x02, 0x00, 0x00, 0x00,
+        0x48, 0x33, 0x4B, 0x18,
+        0x48, 0x89, 0x08
+    };
+    if (!SafeEqual(base + 0x140D, setSignature.data(), setSignature.size())) return false;
+    gProtectedPoolEntries = base + 0x5688;
+    return true;
+}
+
+LONG CountProtectedPoolUsed()
+{
+    if (!gProtectedPoolEntries) return 0;
+    LONG used = 0;
+    __try {
+        for (std::uint32_t page = 0; page < 512U; ++page) {
+            const auto* entries = gProtectedPoolEntries + page * 0x5008U;
+            for (std::uint32_t entry = 0; entry < 512U; ++entry) {
+                if (*(entries + entry * 0x28U + 0x10U) != 0) ++used;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        gProtectedPoolEntries = nullptr;
+        return 0;
+    }
+    if (gState) InterlockedExchange(&gState->protectedPoolUsed, used);
+    return used;
+}
+
+bool ReserveDensityCapacity()
+{
+    const ULONGLONG now = GetTickCount64();
+    if (!gRateWindowStart || now - gRateWindowStart >= 1000ULL) {
+        gRateWindowStart = now;
+        gRateWindowCopies = 0;
+    }
+    if (gRateWindowCopies >= kMaxExtraCreatorsPerSecond) return false;
+
+    if (gProtectedPoolEntries) {
+        if (gPoolScanCountdown <= 0) {
+            const LONG used = CountProtectedPoolUsed();
+            gPoolScanCountdown = 8;
+            if (used >= static_cast<LONG>(kProtectedPoolSafeUsed)) return false;
+        }
+        --gPoolScanCountdown;
+    }
+    ++gRateWindowCopies;
+    return true;
 }
 
 // GameMaker allocates and releases runner heaps from other threads while the
@@ -649,6 +724,11 @@ void CallWithDensity(
         const double baseX = Number(arguments[0]);
         const double baseY = Number(arguments[1]);
         for (int copy = 1; copy <= copies; ++copy) {
+            if (!ReserveDensityCapacity()) {
+                if (gState) InterlockedExchangeAdd(
+                    &gState->capacitySkips, static_cast<LONG>(copies - copy + 1));
+                break;
+            }
             RValue spread[32]{};
             std::memcpy(spread, arguments, static_cast<std::size_t>(argumentCount) * sizeof(RValue));
             SetReal(spread[0], baseX + static_cast<double>(((copy % 5) - 2) * 28));
@@ -731,6 +811,8 @@ DWORD WINAPI Worker(void*)
         goto unload;
     }
     {
+        InitializeProtectedPoolGuard();
+        CountProtectedPoolUsed();
         std::uintptr_t depth = static_cast<std::uintptr_t>(gState->depthAddress);
         std::uintptr_t layer = static_cast<std::uintptr_t>(gState->layerAddress);
         const bool hinted = ResolveRuntimeHint(moduleBase, moduleSize, depth, layer);

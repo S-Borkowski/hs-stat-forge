@@ -1,4 +1,4 @@
-HS Offline Stat Forge v2.4.1
+HS Offline Stat Forge v2.4.2
 ============================
 
 Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player play.
@@ -51,6 +51,10 @@ Compatibility
 - Hero Siege 7.0.5.0 uses an exact-file verified fast path, reducing the tested
   density startup from a long heap scan to about half a second. Unknown builds
   keep the safe adaptive resolver instead of trusting stale addresses.
+- Density watches Hero Siege's protected-variable pool and stops creating
+  extras before that fixed pool can be exhausted. A separate per-second cap
+  also prevents one map load from producing an unsafe burst.
+- The panel reports live pool use and the number of safely skipped creators.
 - Every extra creator result is released through GameMaker's own FREE_RValue
   helper, preventing reference buildup during repeated map transitions.
 - Closing StatForge, Restore All, or a lost heartbeat removes both density

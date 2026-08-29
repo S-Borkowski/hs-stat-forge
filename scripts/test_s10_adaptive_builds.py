@@ -12,7 +12,10 @@ from types import SimpleNamespace
 
 
 STATFORGE_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = STATFORGE_ROOT.parent
+WORKSPACE_ROOT = next(
+    (parent for parent in STATFORGE_ROOT.parents if (parent / "HSOfflineLootForge").is_dir()),
+    STATFORGE_ROOT.parent,
+)
 SYMBOL_TOOLS = WORKSPACE_ROOT / "HSOfflineLootForge" / "scripts"
 sys.path.insert(0, str(STATFORGE_ROOT))
 sys.path.insert(0, str(SYMBOL_TOOLS))
@@ -25,7 +28,13 @@ GAME_BUILDS = (
     Path(r"C:\Users\falor\Downloads\Hero-Siege-AnkerGames\HeroSiege\bin\Hero_Siege.exe"),
     Path(r"C:\Program Files (x86)\Steam\steamapps\common\HeroSiege\bin\Hero_Siege.exe"),
 )
-LEGACY_CONFIG = STATFORGE_ROOT / "_backups" / "pre_obsidian_20260824_090711" / "hs_statforge_stats.json"
+LEGACY_CONFIG = (
+    WORKSPACE_ROOT
+    / "HSStatForge"
+    / "_backups"
+    / "pre_obsidian_20260824_090711"
+    / "hs_statforge_stats.json"
+)
 
 
 def sha256(path: Path) -> str:
