@@ -1,5 +1,5 @@
 {
-    "version": 7,
+    "version": 8,
     "season": 10,
     "stats": [
         {
@@ -22,7 +22,7 @@
             "name": "Movement Speed Multiplier",
             "type": "Double",
             "addr": "",
-            "default_write": "6",
+            "default_write": "2",
             "button_color": "#7c3aed",
             "slider_max": 100.0,
             "resolver": {
@@ -37,7 +37,7 @@
             "name": "All Skills",
             "type": "Double",
             "addr": "",
-            "default_write": "208",
+            "default_write": "28",
             "button_color": "#b45309",
             "slider_max": 1000.0,
             "resolver": {
@@ -51,7 +51,7 @@
             "name": "EXP Multiplier",
             "type": "Double",
             "addr": "",
-            "default_write": "100",
+            "default_write": "10",
             "button_color": "#be123c",
             "slider_max": 100.0,
             "resolver": {
@@ -66,7 +66,7 @@
             "name": "Total Damage Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "693",
+            "default_write": "100",
             "button_color": "#dc2626",
             "slider_max": 1000.0,
             "resolver": {
@@ -82,7 +82,7 @@
             "name": "Attack Speed Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "500",
+            "default_write": "100",
             "button_color": "#ea580c",
             "slider_max": 500.0,
             "resolver": {
@@ -98,7 +98,7 @@
             "name": "Faster Cast Rate Bonus",
             "type": "Double",
             "addr": "",
-            "default_write": "365",
+            "default_write": "50",
             "button_color": "#d97706",
             "slider_max": 500.0,
             "resolver": {
@@ -114,7 +114,7 @@
             "name": "Defense Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "450",
+            "default_write": "100",
             "button_color": "#2563eb",
             "slider_max": 1000.0,
             "resolver": {
@@ -130,7 +130,7 @@
             "name": "Critical Strike Damage Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "1000",
+            "default_write": "100",
             "button_color": "#be123c",
             "slider_max": 1000.0,
             "resolver": {
@@ -146,7 +146,7 @@
             "name": "Critical Strike Chance Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "322",
+            "default_write": "100",
             "button_color": "#db2777",
             "slider_max": 500.0,
             "resolver": {
@@ -162,7 +162,7 @@
             "name": "Spell Critical Damage Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "478",
+            "default_write": "100",
             "button_color": "#9333ea",
             "slider_max": 1000.0,
             "resolver": {
@@ -178,7 +178,7 @@
             "name": "Spell Critical Chance Bonus (%)",
             "type": "Double",
             "addr": "",
-            "default_write": "235",
+            "default_write": "100",
             "button_color": "#7c3aed",
             "slider_max": 500.0,
             "resolver": {
@@ -194,7 +194,7 @@
             "name": "Skill Haste Bonus",
             "type": "Double",
             "addr": "",
-            "default_write": "311",
+            "default_write": "100",
             "button_color": "#0891b2",
             "slider_max": 500.0,
             "resolver": {
@@ -203,6 +203,21 @@
                 "function_name": "gml_Script_StatSpellHaste",
                 "input_mode": "additive",
                 "max": 500
+            }
+        },
+        {
+            "key": "monster_density",
+            "name": "Monster Density Multiplier",
+            "type": "Double",
+            "addr": "",
+            "default_write": "2",
+            "button_color": "#16a34a",
+            "slider_max": 5.0,
+            "resolver": {
+                "kind": "s10_standalone_density",
+                "min": 1,
+                "max": 5,
+                "step": 0.5
             }
         }
     ]

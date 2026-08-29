@@ -3,6 +3,7 @@ import ctypes
 import hashlib
 import json
 import math
+import mmap
 import os
 import struct
 import sys
@@ -17,6 +18,7 @@ import hs_valuescanner as scan
 try:
     import pymem
     import pymem.memory
+    import pymem.process
 except ImportError:
     messagebox.showerror(
         "Missing dependency",
@@ -46,7 +48,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.3.0-s10-extended-stats"
+APP_TITLE = "HS Offline Stat Forge v2.4.0-s10-standalone-density"
 
 
 def runtime_app_dir():
@@ -55,9 +57,21 @@ def runtime_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def runtime_resource_path(filename: str):
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidate = os.path.join(bundle, filename)
+        if os.path.exists(candidate):
+            return candidate
+    direct = os.path.join(runtime_app_dir(), filename)
+    if os.path.exists(direct):
+        return direct
+    return os.path.join(runtime_app_dir(), "native_density", "bin", filename)
+
+
 CONFIG_FILE = os.path.join(runtime_app_dir(), "hs_statforge_stats.json")
 LOG_FILE = os.path.join(runtime_app_dir(), "hs_statforge.log")
-CONFIG_VERSION = 7
+CONFIG_VERSION = 8
 CONFIG_SEASON = 10
 # These Season 9 routes target code that no longer exists in Season 10.  They
 # are pruned during config migration so an older local JSON cannot re-enable
@@ -126,6 +140,12 @@ S10_SCALAR_RESULT_MULTIPLIER = "s10_scalar_result_multiplier"
 S10_RESULT_EPILOGUE_PATCH_SIZE = 7
 S10_RESULT_HOOK_DATA_OFFSET = 0x100
 S10_RESULT_HOOK_ALLOCATION_SIZE = 0x1000
+DENSITY_RESOLVER = "s10_standalone_density"
+DENSITY_DLL_NAME = "HSStatForgeDensity.dll"
+DENSITY_MAGIC = 0x44465348
+DENSITY_VERSION = 1
+DENSITY_STATUS_READY = 2
+DENSITY_STATUS_ERROR = 3
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
 MEM_RELEASE = 0x8000
@@ -155,6 +175,38 @@ kernel32.ResumeThread.argtypes = (ctypes.wintypes.HANDLE,)
 kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
 kernel32.CloseHandle.argtypes = (ctypes.wintypes.HANDLE,)
 kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+
+
+class DensitySharedState(ctypes.Structure):
+    _pack_ = 8
+    _fields_ = [
+        ("magic", ctypes.c_uint32),
+        ("version", ctypes.c_uint32),
+        ("size", ctypes.c_uint32),
+        ("status", ctypes.c_long),
+        ("enabled", ctypes.c_long),
+        ("shutdown", ctypes.c_long),
+        ("last_error", ctypes.c_long),
+        ("reserved0", ctypes.c_uint32),
+        ("multiplier", ctypes.c_double),
+        ("depth_address", ctypes.c_uint64),
+        ("layer_address", ctypes.c_uint64),
+        ("creator_count", ctypes.c_uint32),
+        ("creator_indices", ctypes.c_int32 * 16),
+        ("reserved1", ctypes.c_uint32),
+        ("host_heartbeat", ctypes.c_longlong),
+        ("depth_calls", ctypes.c_longlong),
+        ("layer_calls", ctypes.c_longlong),
+        ("creator_matches", ctypes.c_longlong),
+        ("extra_creators", ctypes.c_longlong),
+        ("hook_generation", ctypes.c_longlong),
+        ("message", ctypes.c_char * 256),
+    ]
+
+
+if ctypes.sizeof(DensitySharedState) != 432:
+    raise RuntimeError("Standalone density IPC layout is invalid")
 
 
 def build_s10_result_epilogue_patch(cave: int, site: int, patch_size: int = S10_RESULT_EPILOGUE_PATCH_SIZE) -> bytes:
@@ -586,6 +638,20 @@ DEFAULT_STATS = [
             "max": 500,
         },
     ),
+    StatBinding(
+        key="monster_density",
+        name="Monster Density Multiplier",
+        type_name="Double",
+        default_write="2",
+        button_color="#16a34a",
+        slider_max=5,
+        resolver={
+            "kind": DENSITY_RESOLVER,
+            "min": 1,
+            "max": 5,
+            "step": 0.5,
+        },
+    ),
 ]
 
 
@@ -613,6 +679,8 @@ class StatForge:
         self._main_module_cache: dict | None = None
         self.runtime_cache_lock = threading.RLock()
         self._last_process_liveness_check = 0.0
+        self.density_mapping = None
+        self.density_state: DensitySharedState | None = None
 
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
@@ -668,7 +736,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.2.3  •  REAL RESULT HOOKS",
+            text="v2.4.0  •  STANDALONE DENSITY",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -902,6 +970,7 @@ class StatForge:
             "movement_speed": "#7658a9",
             "all_skills": "#238b7e",
             "exp_multiplier": "#b74755",
+            "monster_density": "#16a34a",
         }.get(binding.key, binding.button_color or "#7658a9")
 
     def _stat_code(self, binding: StatBinding):
@@ -910,6 +979,7 @@ class StatForge:
             "movement_speed": "MS",
             "all_skills": "AS",
             "exp_multiplier": "XP",
+            "monster_density": "MD",
         }.get(binding.key, binding.name[:2].upper())
 
     def _configure_stat_toggle(self, binding: StatBinding, is_on: bool):
@@ -1111,6 +1181,8 @@ class StatForge:
                     font=("Segoe UI", 9),
                 ).grid(row=3, column=0, columnspan=2, rowspan=3, sticky="ew", padx=12, pady=(4, 12))
             else:
+                minimum = float((binding.resolver or {}).get("min", 0))
+                step = float((binding.resolver or {}).get("step", 1))
                 range_row = tk.Frame(card, bg="#111019")
                 range_row.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 2))
                 tk.Label(
@@ -1122,17 +1194,17 @@ class StatForge:
                 ).pack(side="left")
                 tk.Label(
                     range_row,
-                    text=f"0 — {binding.slider_max:g}",
+                    text=f"{minimum:g} — {binding.slider_max:g}",
                     bg="#111019",
                     fg="#5f5968",
                     font=("Consolas", 8),
                 ).pack(side="right")
                 scale = tk.Scale(
                     card,
-                    from_=0,
+                    from_=minimum,
                     to=binding.slider_max,
                     orient="horizontal",
-                    resolution=1,
+                    resolution=step,
                     variable=slider_var,
                     bg="#111019",
                     fg="#cbd5e1",
@@ -1342,6 +1414,12 @@ class StatForge:
         return bool(
             binding.resolver
             and str(binding.resolver.get("kind") or "").lower() == S10_SCALAR_RESULT_MULTIPLIER
+        )
+
+    def _is_density_binding(self, binding: StatBinding):
+        return bool(
+            binding.resolver
+            and str(binding.resolver.get("kind") or "").lower() == DENSITY_RESOLVER
         )
 
     @staticmethod
@@ -2167,6 +2245,8 @@ class StatForge:
                 return self._resolve_hero_exe_patch_address(binding, binding.resolver)
             if kind == "angelic_rate_multiplier":
                 return self._resolve_angelic_rate_address(binding, binding.resolver)
+            if kind == DENSITY_RESOLVER:
+                return 0
             raise RuntimeError(f"{binding.name}: unknown resolver kind: {kind}")
         if binding.pointer:
             address, reason = explain_pointer_resolution(self.pm.process_handle, self.pm.process_id, binding.pointer)
@@ -2180,6 +2260,10 @@ class StatForge:
 
     def _read_binding_value(self, binding: StatBinding, address: int):
         try:
+            if self._is_density_binding(binding):
+                if self.density_state and self.density_state.status == DENSITY_STATUS_READY:
+                    return float(self.density_state.multiplier) if self.density_state.enabled else 1.0
+                return 1.0
             if self._is_s10_result_binding(binding):
                 payload = self.stat_multi_patches.get(binding.key)
                 if not payload:
@@ -2271,7 +2355,8 @@ class StatForge:
             return
         binding = self._find_binding(key)
         max_value = binding.slider_max if binding else 1000
-        slider.set(max(0, min(max_value, numeric)))
+        min_value = float((binding.resolver or {}).get("min", 0)) if binding else 0
+        slider.set(max(min_value, min(max_value, numeric)))
 
     def _set_active_text(self):
         if not self.active_stat_keys:
@@ -2319,6 +2404,7 @@ class StatForge:
     def _detach_dead_process(self):
         """Forget runtime-only state after the target process has exited."""
         old_pid = self.selected_pid
+        self._close_density_ipc()
         try:
             if self.pm:
                 self.pm.close_process()
@@ -2835,6 +2921,134 @@ class StatForge:
         self.details.set(f"{binding.name}: native game calculation restored.")
         self.log_line(f"{binding.name}: OFF | all native result hooks restored.")
 
+    def _density_module_loaded(self):
+        if not self.selected_pid:
+            return False
+        try:
+            return any(
+                module.get("name", "").lower() == DENSITY_DLL_NAME.lower()
+                for module in list_modules(self.selected_pid)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _density_message(state: DensitySharedState):
+        return bytes(state.message).split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+    def _close_density_ipc(self):
+        mapping = self.density_mapping
+        self.density_state = None
+        self.density_mapping = None
+        if mapping:
+            try:
+                mapping.close()
+            except Exception:
+                pass
+
+    def _enable_density(self, binding: StatBinding, value_text: str):
+        multiplier = float(parse_value(value_text, binding.type_name))
+        minimum = float((binding.resolver or {}).get("min", 1))
+        maximum = float((binding.resolver or {}).get("max", 5))
+        step = float((binding.resolver or {}).get("step", 0.5))
+        if not math.isfinite(multiplier) or not minimum <= multiplier <= maximum:
+            raise RuntimeError(f"choose a value between {minimum:g}x and {maximum:g}x")
+        snapped = round((multiplier - minimum) / step) * step + minimum
+        if abs(snapped - multiplier) > 1e-6:
+            raise RuntimeError(f"use {step:g}x steps (for example 1.5x, 2x, or 2.5x)")
+        multiplier = snapped
+
+        if self.density_state and self.density_state.status == DENSITY_STATUS_READY:
+            state = self.density_state
+        else:
+            if self._density_module_loaded():
+                raise RuntimeError(
+                    "an older standalone density runtime is still unloading; wait a few seconds or restart the game"
+                )
+            self._close_density_ipc()
+            mapping = mmap.mmap(
+                -1,
+                ctypes.sizeof(DensitySharedState),
+                tagname=f"Local\\HSStatForgeDensity_{self.selected_pid}",
+                access=mmap.ACCESS_WRITE,
+            )
+            state = DensitySharedState.from_buffer(mapping)
+            ctypes.memset(ctypes.addressof(state), 0, ctypes.sizeof(state))
+            state.magic = DENSITY_MAGIC
+            state.version = DENSITY_VERSION
+            state.size = ctypes.sizeof(state)
+            state.multiplier = 1.0
+            state.host_heartbeat = kernel32.GetTickCount64()
+            self.density_mapping = mapping
+            self.density_state = state
+
+            dll_path = os.path.abspath(runtime_resource_path(DENSITY_DLL_NAME))
+            if not os.path.isfile(dll_path):
+                self._close_density_ipc()
+                raise RuntimeError(f"{DENSITY_DLL_NAME} is missing from the StatForge package")
+            pymem.process.inject_dll_from_path(self.pm.process_handle, dll_path)
+            deadline = time.time() + 30.0
+            while time.time() < deadline:
+                state.host_heartbeat = kernel32.GetTickCount64()
+                if state.status == DENSITY_STATUS_READY:
+                    break
+                if state.status >= DENSITY_STATUS_ERROR:
+                    break
+                time.sleep(0.05)
+            if state.status != DENSITY_STATUS_READY:
+                error = self._density_message(state) or "standalone density resolver timed out"
+                code = int(state.last_error)
+                state.enabled = 0
+                state.multiplier = 1.0
+                state.shutdown = 1
+                time.sleep(0.2)
+                self._close_density_ipc()
+                raise RuntimeError(f"{error} (error {code})")
+            if state.creator_count < 7 or not state.depth_address or not state.layer_address:
+                state.shutdown = 1
+                time.sleep(0.2)
+                self._close_density_ipc()
+                raise RuntimeError("standalone density verification failed; no boost was enabled")
+
+        state.multiplier = multiplier
+        state.host_heartbeat = kernel32.GetTickCount64()
+        state.enabled = 1
+        self.stat_multi_patches[binding.key] = {
+            "kind": DENSITY_RESOLVER,
+            "last_creator_matches": int(state.creator_matches),
+            "last_extra_creators": int(state.extra_creators),
+        }
+        self.active_stat_keys.add(binding.key)
+        binding.default_write = str(int(multiplier) if multiplier.is_integer() else multiplier)
+        self._save_bindings()
+        current_var = self.stat_current_vars.get(binding.key)
+        if current_var:
+            current_var.set(f"Current: {multiplier:g}x | waiting for a new zone")
+        self.details.set(
+            f"{binding.name}: {multiplier:g}x ready. Enter or reload a zone to create the extra enemies."
+        )
+        self.log_line(
+            f"{binding.name}: ON | {multiplier:g}x | standalone runtime, "
+            f"{state.creator_count} creator routes verified, no YYToolkit dependency."
+        )
+
+    def _disable_density(self, binding: StatBinding):
+        if self.density_state:
+            self.density_state.enabled = 0
+            self.density_state.multiplier = 1.0
+            self.density_state.shutdown = 1
+            deadline = time.time() + 4.0
+            while time.time() < deadline and self._density_module_loaded():
+                time.sleep(0.05)
+        self._close_density_ipc()
+        self.stat_multi_patches.pop(binding.key, None)
+        self.active_stat_keys.discard(binding.key)
+        current_var = self.stat_current_vars.get(binding.key)
+        if current_var:
+            current_var.set("Current: 1x native")
+        self.details.set(f"{binding.name}: native 1x enemy creation restored.")
+        self.log_line(f"{binding.name}: OFF | hooks removed and standalone DLL unloaded.")
+
     def _enable_stat(self, binding: StatBinding):
         if not self._require():
             return
@@ -2843,6 +3057,9 @@ class StatForge:
             self.log_line(f"{binding.name}: enter a value first.")
             return
         try:
+            if self._is_density_binding(binding):
+                self._enable_density(binding, value_text)
+                return
             if self._is_s10_result_binding(binding):
                 self._enable_s10_result_modifier(binding, value_text)
                 return
@@ -2910,6 +3127,9 @@ class StatForge:
         if not self._require():
             return
         try:
+            if self._is_density_binding(binding):
+                self._disable_density(binding)
+                return
             if self._is_s10_result_binding(binding):
                 self._disable_s10_result_modifier(binding)
                 return
@@ -2960,6 +3180,28 @@ class StatForge:
                     self._detach_dead_process()
                     return
             if self.attached and self.pm:
+                if self.density_state:
+                    self.density_state.host_heartbeat = kernel32.GetTickCount64()
+                    density_payload = self.stat_multi_patches.get("monster_density")
+                    if density_payload and "monster_density" in self.active_stat_keys:
+                        matches = int(self.density_state.creator_matches)
+                        extras = int(self.density_state.extra_creators)
+                        previous_matches = int(density_payload.get("last_creator_matches", 0))
+                        previous_extras = int(density_payload.get("last_extra_creators", 0))
+                        if matches != previous_matches or extras != previous_extras:
+                            density_payload["last_creator_matches"] = matches
+                            density_payload["last_extra_creators"] = extras
+                            current_var = self.stat_current_vars.get("monster_density")
+                            if current_var:
+                                current_var.set(
+                                    f"Current: {self.density_state.multiplier:g}x | "
+                                    f"creators {matches} | extras {extras}"
+                                )
+                            if extras > previous_extras:
+                                self.log_line(
+                                    f"Monster Density Multiplier: LIVE | creator routes {matches}, "
+                                    f"extra creators {extras}."
+                                )
                 for key, payload in list(self.stat_multi_patches.items()):
                     if payload.get("kind") not in (
                         S10_ARRAY_RESULT_MULTIPLIER,
@@ -3155,6 +3397,7 @@ class StatForge:
         pm = None
         try:
             pid, name = process
+            self._close_density_ipc()
             pm = pymem.Pymem(pid)
             try:
                 main_module = resolve_main_module(pm, PROCESS_NAME)

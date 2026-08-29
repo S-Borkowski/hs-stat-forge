@@ -1,3 +1,30 @@
+# HS Offline Stat Forge v2.4.0 — Standalone Monster Density
+
+## Added
+
+- Monster Density from 1x to 5x in 0.5x steps.
+- The required native runtime is embedded inside `HSStatForge.exe`.
+- No ForgePact, Aurie, YYToolkit or separate DLL installation is required.
+
+## Fixed
+
+- GameMaker object references are now decoded through the game's own runtime
+  converter, so density targets the correct enemy-creator objects.
+- Every extra creator result is released correctly. This fixes the crash that
+  could occur after moving to a second map with high density enabled.
+- Density hooks unload automatically when disabled, restored, the panel closes,
+  or the panel heartbeat is lost.
+
+## Live verification
+
+- Tested with Hero Siege 7.0.5.0 at 5x density.
+- Multiple consecutive map transitions completed without a crash.
+- Final test observed 1,206 native creators and 4,824 extra creators.
+
+Offline/single-player only. Launch Hero Siege without EAC.
+
+---
+
 # HS Offline Stat Forge v2.3.0 — Extended Stats
 
 ## Added

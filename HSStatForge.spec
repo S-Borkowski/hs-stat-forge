@@ -7,7 +7,7 @@ hiddenimports = collect_submodules("pymem")
 a = Analysis(
     ["hs_statforge.py"],
     pathex=[],
-    binaries=[],
+    binaries=[("native_density/bin/HSStatForgeDensity.dll", ".")],
     datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -30,7 +30,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=["HSStatForgeDensity.dll"],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,

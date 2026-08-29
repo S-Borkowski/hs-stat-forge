@@ -1,4 +1,4 @@
-HS Offline Stat Forge v2.3.0
+HS Offline Stat Forge v2.4.0
 ============================
 
 Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player play.
@@ -16,6 +16,7 @@ Boosts
 - Defense Bonus (%)
 - Critical Strike Chance and Damage Bonus (%)
 - Spell Critical Chance and Damage Bonus (%)
+- Monster Density Multiplier (1x to 5x in 0.5x steps)
 
 Quick start
 -----------
@@ -43,6 +44,14 @@ Compatibility
   game-call counts, so a written patch is not mistaken for a working stat.
 - Unsupported layouts are rejected without a write.
 - Live apply/restore verification passed on Steam Hero Siege 7.0.5.0.
+- Monster Density uses StatForge's own embedded native runtime. It does not
+  require ForgePact, Aurie, YYToolkit, or a separately installed plugin.
+- Density resolves the current GameMaker create functions and the complete
+  Enemy_Creator object block at runtime. Ambiguous layouts are blocked safely.
+- Every extra creator result is released through GameMaker's own FREE_RValue
+  helper, preventing reference buildup during repeated map transitions.
+- Closing StatForge, Restore All, or a lost heartbeat removes both density
+  hooks and unloads the embedded DLL from the game process.
 
 Important
 ---------
