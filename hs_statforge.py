@@ -48,7 +48,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.4.2-s10-safe-density"
+APP_TITLE = "HS Offline Stat Forge v2.4.3-s10-safe-density"
 
 
 def runtime_app_dir():
@@ -746,7 +746,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.4.2  •  SAFE STANDALONE DENSITY",
+            text="v2.4.3  •  SAFE STANDALONE DENSITY",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -2182,7 +2182,15 @@ class StatForge:
             original = code[offset:offset + S10_RESULT_EPILOGUE_PATCH_SIZE]
             if original[:3] != b"\x48\x8b\x85":
                 continue
-            if code[offset + 7:offset + 11] != b"\x0f\x28\xb4\x24":
+            # A seven-byte MOV RAX,[RBP+disp32] is already large enough for
+            # our CALL patch. The following instruction is used only to
+            # prove this is a real function epilogue. CalculateEndDamage
+            # restores its large frame with LEA R11,[RSP+disp32], while the
+            # smaller Stat* functions restore XMM6 with MOVAPS.
+            if code[offset + 7:offset + 11] not in (
+                b"\x0f\x28\xb4\x24",
+                b"\x4c\x8d\x9c\x24",
+            ):
                 continue
             if not has_verified_unwind(offset + 7):
                 continue
@@ -2226,6 +2234,17 @@ class StatForge:
                 f"{binding.name}: expected one native result epilogue in {function_name}, found {len(candidates)}"
             )
         site, original = candidates[0]
+        if original[:3] == b"\x48\x8b\x85":
+            # The adjacent instruction is part of the epilogue proof even
+            # though the seven-byte CALL patch intentionally leaves it native.
+            # Fail closed if another tool changed that live instruction.
+            offset = site - function_address
+            expected_context = code[offset + len(original):offset + len(original) + 8]
+            live_context = self._read_raw(site + len(original), len(expected_context))
+            if len(expected_context) != 8 or live_context != expected_context:
+                raise RuntimeError(
+                    f"{binding.name}: native result epilogue context differs from the executable"
+                )
         live = self._read_raw(site, len(original))
         owned = len(live) == len(original) and live[:1] == b"\xe8" and all(byte == 0x90 for byte in live[5:])
         if live != original and not owned:

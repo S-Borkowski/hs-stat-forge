@@ -159,7 +159,7 @@ bulundu. Bu tarama hiçbir oyun değeri değiştirmedi.
 
 | Özellik | Fonksiyon | Function RVA | Doğrulanmış hook RVA |
 |---|---|---:|---|
-| Total Damage | `CalculateEndDamage` | `0x39E000` | `0x3A5714` |
+| Total Damage | `CalculateEndDamage` | `0x39E000` | `0x3A5425` |
 | Spell Critical Chance | `StatSpellCritRate` | `0x5A175B0` | `0x5A1B87C` |
 | Critical Strike Damage | `StatCritDamage` | `0x5A22A70` | `0x5A3021C` |
 | Spell Critical Damage | `StatSpellCritDamage` | `0x5A1B8B0` | `0x5A1FA5C` |
@@ -176,13 +176,23 @@ Bu telafi yapılmazsa özellikle `StatSpellCritDamage` dönüşü `0x5A1FA6B`
 noktasında access violation üretir. `test_extended_result_hook_execution.py`
 R14+RBP, R14+R11 ve R15+RBX biçimlerini gerçek native kod olarak çalıştırır.
 
+`CalculateEndDamage` için eski resolver, isimlendirilmiş fonksiyonun ardından
+gelen anonim helper'ın `MOV RAX,R14` kapanışını (`0x3A5714`) seçiyordu. Helper
+sonucu testlerde sıfır olduğu için sayaç artsa bile Total Damage hep
+`0 × çarpan = 0` görünüyordu. Gerçek fonksiyon sonucu `0x3A5425` adresindeki
+`MOV RAX,[RBP+0xE00]` talimatıdır; hemen ardından
+`LEA R11,[RSP+0xEA8]` gelir. Hook yalnız yedi baytlık MOV'u kapsar, LEA native
+çalışır; bu biçimde ayrıca CALL-stack displacement telafisi gerekmez.
+
 Canlı 7.0.5.0 sonuçları: Attack Speed `23.1×4=92.4` (48 çağrı),
 Skill Haste `12+100=112` (631 çağrı), FCR `33+365=398`,
 Defense `1464×5.5=8052`,
 Crit Chance `25×4.22=105.5`, Crit Damage `80.9×11=889.9`, Spell Crit Chance
-`34×3.35=113.9`, Spell Crit Damage `62×5.78=358.36`. Total Damage gerçek
-fonksiyonda çağrı aldı fakat test çağrılarının native değeri sıfırdı; non-zero
-combat hit ayrıca teyit edilmelidir. Attack Speed için önceki iki-el array
+`34×3.35=113.9`, Spell Crit Damage `62×5.78=358.36`. Düzeltilen Total Damage
+resolver'ı çalışan EXE üzerinde gerçek `0x3A5425` kapanışını seçti. Canlı
+combat sonuçları `4712.48×5.85=27568`, `4743.68×11=52180.5` ve
+`4634.68×5.78=26788.5` olarak gözlendi. Her kapatmada native kapanış geri
+yüklendi ve son Restore All başarıyla tamamlandı. Attack Speed için önceki iki-el array
 yaklaşımı tür kontrolünde her çağrıyı atladığı için kaldırıldı.
 
 ## 7.0.5.0 monster-density çökme sınırı

@@ -16,7 +16,7 @@ import hs_statforge as app  # noqa: E402
 
 
 EXPECTED = {
-    "gml_Script_CalculateEndDamage": (0x3A5714, "49 8b c6 48 8b 6c 24 58"),
+    "gml_Script_CalculateEndDamage": (0x3A5425, "48 8b 85 00 0e 00 00"),
     "gml_Script_StatSpellCritRate": (0x5A1B87C, "49 8b c6 0f 28 b4 24 a0 03 00 00"),
     "gml_Script_StatCritDamage": (0x5A3021C, "48 8b 85 c0 18 00 00"),
     "gml_Script_StatSpellCritDamage": (0x5A1FA5C, "49 8b c6 4c 8d 9c 24 a0 03 00 00"),

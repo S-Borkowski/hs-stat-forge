@@ -21,6 +21,22 @@ class RValue(ctypes.Structure):
 
 CASES = (
     (
+        "RBP result + LEA R11,[RSP+20h]",
+        bytes.fromhex(
+            "55 "                       # push rbp
+            "48 89 e5 "                 # rbp = rsp
+            "48 83 ec 20 "              # sub rsp,20h
+            "48 89 8d f8 ff ff ff"      # save result pointer at [rbp-8]
+        ),
+        bytes.fromhex("48 8b 85 f8 ff ff ff"),
+        bytes.fromhex(
+            "4c 8d 9c 24 20 00 00 00 "  # r11 = saved-rbp stack slot
+            "49 8b e3 "                 # rsp = r11
+            "5d "                       # pop rbp
+            "c3"
+        ),
+    ),
+    (
         "R14 + MOV RBP,[RSP+58h]",
         bytes.fromhex(
             "48 81 ec 60 00 00 00 "  # sub rsp,60h
@@ -142,7 +158,7 @@ def run_case(label: str, prefix: bytes, original: bytes, suffix: bytes) -> None:
 def main() -> int:
     for case in CASES:
         run_case(*case)
-    print("PASS: all observed R14/RSP result preludes preserve the native stack.")
+    print("PASS: all observed result preludes preserve the native stack.")
     return 0
 
 

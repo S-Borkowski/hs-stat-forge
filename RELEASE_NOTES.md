@@ -1,3 +1,31 @@
+# HS Offline Stat Forge v2.4.3 — Total Damage Resolver Fix
+
+## Fixed
+
+- Total Damage now hooks the real `CalculateEndDamage` result epilogue at
+  `RVA 0x3A5425` on Steam 7.0.5.0. The previous resolver crossed into an
+  anonymous helper and selected its always-zero result at `RVA 0x3A5714`.
+- The resolver recognizes the large-frame
+  `MOV RAX,[RBP+disp32] + LEA R11,[RSP+disp32]` epilogue shape, patches only
+  the complete seven-byte result load, and rejects modified adjacent context.
+- Added a regression test containing both the real epilogue and the misleading
+  helper, plus native x64 execution coverage for the new hook shape.
+
+## Verification
+
+- The running 7.0.5.0 executable resolves to `0x3A5425` with original bytes
+  `48 8B 85 00 0E 00 00`; all nine exact result resolvers pass read-only checks.
+- Native execution verifies `10 × 1.5 = 15` and safe stack restoration for all
+  five supported epilogue layouts.
+- Live combat produced non-zero results at the corrected `0x3A5425` site,
+  including `4712.48 × 5.85 = 27568`, `4743.68 × 11 = 52180.5`, and
+  `4634.68 × 5.78 = 26788.5`. Every disable restored the native epilogue, and
+  the final Restore All completed successfully.
+
+Offline/single-player only. Launch Hero Siege without EAC.
+
+---
+
 # HS Offline Stat Forge v2.4.2 — Safe Monster Density
 
 ## Fixed
@@ -107,7 +135,9 @@ native value. Faster Cast Rate and Skill Haste add points directly.
 - Spell Critical Chance: `34 × 3.35 = 113.9`.
 - Spell Critical Damage: `62 × 5.78 = 358.36`.
 - Skill Haste: `12 + 100 = 112` over 631 live calls.
-- Total Damage was verified in live combat and restores safely.
+- Total Damage hook installation/restoration was observed, but the sampled
+  calls returned zero; the resolver was corrected in v2.4.3 before claiming a
+  non-zero combat result.
 - Attack Speed: live native `23.1 × 4 = 92.4` over 48 calls. The earlier
   MainHand/OffHand array route was removed because those are detail queries.
 

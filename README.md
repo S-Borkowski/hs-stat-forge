@@ -1,4 +1,4 @@
-HS Offline Stat Forge v2.4.2
+HS Offline Stat Forge v2.4.3
 ============================
 
 Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player play.
@@ -40,6 +40,8 @@ Compatibility
 - RSP-relative native epilogues are replayed with CALL-stack compensation.
 - Attack Speed scales the scalar `StatAttackSpeed` result used by gameplay;
   the hand-specific detail arrays are intentionally not patched.
+- Total Damage targets `CalculateEndDamage`'s own final result epilogue and
+  rejects adjacent helper code or modified live epilogue context.
 - The panel and hs_statforge.log show native value, scaled value and actual
   game-call counts, so a written patch is not mistaken for a working stat.
 - Unsupported layouts are rejected without a write.
