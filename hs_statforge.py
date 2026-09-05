@@ -48,7 +48,7 @@ from hs_valuescanner import (
     explain_pointer_resolution,
 )
 
-APP_TITLE = "HS Offline Stat Forge v2.4.3-s10-safe-density"
+APP_TITLE = "HS Offline Stat Forge v2.5.0"
 
 
 def runtime_app_dir():
@@ -71,12 +71,19 @@ def runtime_resource_path(filename: str):
 
 CONFIG_FILE = os.path.join(runtime_app_dir(), "hs_statforge_stats.json")
 LOG_FILE = os.path.join(runtime_app_dir(), "hs_statforge.log")
-CONFIG_VERSION = 8
+CONFIG_VERSION = 9
 CONFIG_SEASON = 10
 # These Season 9 routes target code that no longer exists in Season 10.  They
 # are pruned during config migration so an older local JSON cannot re-enable
 # an unsafe fallback address.
 RETIRED_S10_BINDINGS = {"angelic_drop_rate", "angelic_ss_drops"}
+# Bindings that patch the same native function in incompatible ways.  The
+# entry proxy returns before the epilogue runs, which would silently starve
+# the additive result hook, so only one of each group may be active.
+STAT_EXCLUSIVE_KEYS = {
+    "all_skills": ("all_skills_set",),
+    "all_skills_set": ("all_skills",),
+}
 AC_DLL_TABLE_RVA = 0x5688
 AC_DLL_TABLE_ENTRY_SIZE = 0x28
 AC_DLL_TABLE_PAGE_SIZE = 0x5008
@@ -486,11 +493,34 @@ DEFAULT_STATS = [
     ),
     StatBinding(
         key="all_skills",
-        name="All Skills",
+        name="All Skills Bonus (+N)",
+        type_name="Double",
+        default_write="19",
+        button_color="#b45309",
+        slider_max=100,
+        resolver={
+            # StatAllSkills returns a stat array like Skill Haste; element zero
+            # is the total the talent path reads through ReturnSpecificStat.
+            # Adding to the finished native result keeps gear "+X All Skills",
+            # elemental flats and buffs stacking on top instead of replacing
+            # the whole function with a constant.
+            "kind": S10_ARRAY_RESULT_ADDITIVE,
+            "module": PROCESS_NAME,
+            "function_name": "gml_Script_StatAllSkills",
+            "input_mode": "additive",
+            "max": 100,
+        },
+    ),
+    StatBinding(
+        key="all_skills_set",
+        name="All Skills (Set Exact)",
         type_name="Double",
         default_write="28",
-        button_color="#b45309",
+        button_color="#9a3412",
+        slider_max=100,
         resolver={
+            # Legacy absolute mode: replaces the StatAllSkills entry so the
+            # function returns this constant and nothing else stacks.
             "kind": "s10_stat_return_proxy",
             "module": PROCESS_NAME,
             "function_name": "gml_Script_StatAllSkills",
@@ -746,7 +776,7 @@ class StatForge:
         ).pack(anchor="e")
         tk.Label(
             build_box,
-            text="v2.4.3  •  SAFE STANDALONE DENSITY",
+            text="v2.5.0  •  ADDITIVE ALL SKILLS",
             fg="#716b7d",
             bg="#0a0910",
             font=("Consolas", 8),
@@ -979,6 +1009,7 @@ class StatForge:
             "magic_find": "#c6923c",
             "movement_speed": "#7658a9",
             "all_skills": "#238b7e",
+            "all_skills_set": "#8a5a2b",
             "exp_multiplier": "#b74755",
             "monster_density": "#16a34a",
         }.get(binding.key, binding.button_color or "#7658a9")
@@ -987,7 +1018,8 @@ class StatForge:
         return {
             "magic_find": "MF",
             "movement_speed": "MS",
-            "all_skills": "AS",
+            "all_skills": "A+",
+            "all_skills_set": "A=",
             "exp_multiplier": "XP",
             "monster_density": "MD",
         }.get(binding.key, binding.name[:2].upper())
@@ -1274,6 +1306,12 @@ class StatForge:
             self.stat_frame.grid_rowconfigure(row, weight=1)
 
         self.refresh_status()
+
+    def _conflicting_active_key(self, binding: StatBinding):
+        for other_key in STAT_EXCLUSIVE_KEYS.get(binding.key, ()):
+            if other_key in self.active_stat_keys:
+                return other_key
+        return None
 
     def _find_binding(self, key: str):
         return next((item for item in self.stat_bindings if item.key == key), None)
@@ -3105,6 +3143,13 @@ class StatForge:
 
     def _enable_stat(self, binding: StatBinding):
         if not self._require():
+            return
+        blocker_key = self._conflicting_active_key(binding)
+        if blocker_key:
+            blocker = self._find_binding(blocker_key)
+            blocker_name = blocker.name if blocker else blocker_key
+            self.log_line(f"{binding.name}: turn off {blocker_name} first; both modes patch StatAllSkills.")
+            self.details.set(f"{binding.name}: disable {blocker_name} before enabling this mode.")
             return
         value_text = self.stat_value_vars.get(binding.key).get().strip() if self.stat_value_vars.get(binding.key) else ""
         if not value_text:

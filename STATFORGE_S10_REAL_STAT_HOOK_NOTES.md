@@ -127,6 +127,30 @@ kanıtlar. Oyuncunun gözlemi de bu sonuçlarla uyuşmuştur.
    döndüğünü gözle.
 8. Ancak bundan sonra UI ve yayın paketine ekle.
 
+## All Skills: mutlak proxy'den toplamalı sonuç kancasına (v2.5.0, 2026-09-05)
+
+- Eski `all_skills` binding'i `s10_stat_return_proxy` idi: `gml_Script_StatAllSkills`
+  girişine `MOV RAX,imm64` + return yazıyordu. Fonksiyon gövdesi hiç çalışmadığı
+  için item "+X All Skills", elemental flat'ler ve buff'lar sonuca girmiyordu;
+  kullanıcıların "mutlak" şikâyetinin kökü bu.
+- Talent yolu: `ReturnTalentLevel -> ReturnSpecificStat -> StatAllSkills`.
+  `StatAllSkills`'in tek çağıranı `ReturnSpecificStat`'tır. `ReturnTalentLevel`
+  gövdesinde `20` benzeri bir sabit ve `min()` yoktur; 9 `Compare` çağrısının
+  hepsi `array_contains` tag kontrolü. Efektif seviye burada kırpılmaz.
+- `StatAllSkills` `@@NewGMLArray@@` ile bir stat array'i döndürür; element sıfır
+  toplamdır (Skill Haste ile aynı biçim). Epilog:
+  `MOV RAX,R14 + MOVAPS XMM6,[RSP+0x360]` = `49 8B C6 0F 28 B4 24 60 03 00 00`,
+  zaten doğrulanmış 11 baytlık R14 biçimi. Resolver birinci geçişte 0, ikinci
+  geçişte tam 1 aday bulur: fonksiyon ofseti `+22060`.
+- Yeni binding: `S10_ARRAY_RESULT_ADDITIVE`, `input_mode: additive`, `max: 100`,
+  varsayılan `19` (her skile 1 puan + 19 = 20; +2 All Skills item ile 22).
+  Eski davranış `all_skills_set` (`s10_stat_return_proxy`) olarak kaldı.
+  İkisi aynı fonksiyonu yamaladığı ve giriş proxy'si epilogu hiç çalıştırmadığı
+  için `STAT_EXCLUSIVE_KEYS` ile aynı anda açılmaları engellenir.
+- Canlı doğrulama kuralı değişmedi: panelde native değer, `+N` ve gerçek çağrı
+  sayacı görülmeden çalışıyor denmez. Tooltip/talent ekranının 20 üstünü
+  gösterip göstermediği ayrıca oyunda bakılacak bir görüntü sorusudur.
+
 ## Sonraki stat adayları ve özel kuralları
 
 ForgePact araştırmasında bulunan adaylar:

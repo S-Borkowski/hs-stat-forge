@@ -1,4 +1,4 @@
-HS Offline Stat Forge v2.4.3
+HS Offline Stat Forge v2.5.0
 ============================
 
 Adaptive Season 10 runtime stat editor for Hero Siege offline/single-player play.
@@ -7,7 +7,10 @@ Boosts
 ------
 - Magic Find Multiplier (scales the native final value)
 - Movement Speed Multiplier (scales the native final value)
-- All Skills
+- All Skills Bonus (+N): adds N to the native StatAllSkills result, so gear
+  "+X All Skills", elemental skill flats and buffs keep stacking on top
+- All Skills (Set Exact): the old absolute mode; replaces the result with a
+  constant. Only one All Skills mode can be active at a time.
 - EXP Multiplier (multiplies the game's final experience reward)
 - Total Damage Bonus (%)
 - Attack Speed Bonus (%) from the live aggregate attack-timing value

@@ -1,3 +1,40 @@
+# HS Offline Stat Forge v2.5.0 — Additive All Skills
+
+## Changed
+
+- `All Skills` is now `All Skills Bonus (+N)`: it hooks the finished
+  `gml_Script_StatAllSkills` result array (the same additive result hook used
+  by Skill Haste and Faster Cast Rate) and adds N to element zero. Gear
+  "+X All Skills", elemental skill flats and buffs keep stacking, so one point
+  in every skill plus +19 shows 20, and a +2 All Skills item makes it 22.
+- The old absolute behaviour stays available as `All Skills (Set Exact)`,
+  which still replaces the function entry with a constant.
+- The two modes patch the same function, so enabling one while the other is
+  active is refused with a log message instead of installing a dead hook.
+- Existing `hs_statforge_stats.json` files migrate automatically: the
+  `all_skills` resolver is replaced and its default value becomes `19`.
+
+## Why
+
+- `ReturnTalentLevel` reaches the bonus through
+  `ReturnSpecificStat -> StatAllSkills`, whose only caller is
+  `ReturnSpecificStat`; the function body has no level cap constant, so the
+  additive route produces levels above 20.
+- The entry proxy skipped the native body entirely, which is why item bonuses
+  never stacked in earlier versions.
+
+## Verification
+
+- Static: `StatAllSkills` ends in `MOV RAX,R14 + MOVAPS XMM6,[RSP+disp32]`,
+  an already verified 11-byte epilogue; the resolver finds exactly one site.
+- Live counter verification (native value, `+N`, real game calls in the
+  panel and `hs_statforge.log`) is still required before calling it working
+  on a given build.
+
+Offline/single-player only. Launch Hero Siege without EAC.
+
+---
+
 # HS Offline Stat Forge v2.4.3 — Total Damage Resolver Fix
 
 ## Fixed

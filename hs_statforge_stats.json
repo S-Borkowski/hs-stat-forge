@@ -1,5 +1,5 @@
 {
-    "version": 8,
+    "version": 9,
     "season": 10,
     "stats": [
         {
@@ -9,7 +9,7 @@
             "addr": "",
             "default_write": "10",
             "button_color": "#0f766e",
-            "slider_max": 1000.0,
+            "slider_max": 1000,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -24,7 +24,7 @@
             "addr": "",
             "default_write": "2",
             "button_color": "#7c3aed",
-            "slider_max": 100.0,
+            "slider_max": 100,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -34,12 +34,28 @@
         },
         {
             "key": "all_skills",
-            "name": "All Skills",
+            "name": "All Skills Bonus (+N)",
+            "type": "Double",
+            "addr": "",
+            "default_write": "19",
+            "button_color": "#b45309",
+            "slider_max": 100,
+            "resolver": {
+                "kind": "s10_array_result_additive",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatAllSkills",
+                "input_mode": "additive",
+                "max": 100
+            }
+        },
+        {
+            "key": "all_skills_set",
+            "name": "All Skills (Set Exact)",
             "type": "Double",
             "addr": "",
             "default_write": "28",
-            "button_color": "#b45309",
-            "slider_max": 1000.0,
+            "button_color": "#9a3412",
+            "slider_max": 100,
             "resolver": {
                 "kind": "s10_stat_return_proxy",
                 "module": "Hero_Siege.exe",
@@ -53,7 +69,7 @@
             "addr": "",
             "default_write": "10",
             "button_color": "#be123c",
-            "slider_max": 100.0,
+            "slider_max": 100,
             "resolver": {
                 "kind": "s10_scalar_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -68,7 +84,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#dc2626",
-            "slider_max": 1000.0,
+            "slider_max": 1000,
             "resolver": {
                 "kind": "s10_scalar_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -84,7 +100,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#ea580c",
-            "slider_max": 500.0,
+            "slider_max": 500,
             "resolver": {
                 "kind": "s10_scalar_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -100,11 +116,27 @@
             "addr": "",
             "default_write": "50",
             "button_color": "#d97706",
-            "slider_max": 500.0,
+            "slider_max": 500,
             "resolver": {
                 "kind": "s10_array_result_additive",
                 "module": "Hero_Siege.exe",
                 "function_name": "gml_Script_StatFasterCastRate",
+                "input_mode": "additive",
+                "max": 500
+            }
+        },
+        {
+            "key": "skill_haste_bonus",
+            "name": "Skill Haste Bonus",
+            "type": "Double",
+            "addr": "",
+            "default_write": "100",
+            "button_color": "#0891b2",
+            "slider_max": 500,
+            "resolver": {
+                "kind": "s10_array_result_additive",
+                "module": "Hero_Siege.exe",
+                "function_name": "gml_Script_StatSpellHaste",
                 "input_mode": "additive",
                 "max": 500
             }
@@ -116,7 +148,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#2563eb",
-            "slider_max": 1000.0,
+            "slider_max": 1000,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -132,7 +164,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#be123c",
-            "slider_max": 1000.0,
+            "slider_max": 1000,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -148,7 +180,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#db2777",
-            "slider_max": 500.0,
+            "slider_max": 500,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -164,7 +196,7 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#9333ea",
-            "slider_max": 1000.0,
+            "slider_max": 1000,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
@@ -180,28 +212,12 @@
             "addr": "",
             "default_write": "100",
             "button_color": "#7c3aed",
-            "slider_max": 500.0,
+            "slider_max": 500,
             "resolver": {
                 "kind": "s10_array_result_multiplier",
                 "module": "Hero_Siege.exe",
                 "function_name": "gml_Script_StatSpellCritRate",
                 "input_mode": "bonus_percent",
-                "max": 500
-            }
-        },
-        {
-            "key": "skill_haste_bonus",
-            "name": "Skill Haste Bonus",
-            "type": "Double",
-            "addr": "",
-            "default_write": "100",
-            "button_color": "#0891b2",
-            "slider_max": 500.0,
-            "resolver": {
-                "kind": "s10_array_result_additive",
-                "module": "Hero_Siege.exe",
-                "function_name": "gml_Script_StatSpellHaste",
-                "input_mode": "additive",
                 "max": 500
             }
         },
@@ -212,7 +228,7 @@
             "addr": "",
             "default_write": "2",
             "button_color": "#16a34a",
-            "slider_max": 5.0,
+            "slider_max": 5,
             "resolver": {
                 "kind": "s10_standalone_density",
                 "min": 1,
